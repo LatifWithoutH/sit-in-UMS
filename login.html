@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - IoT Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-card">
+            <h1>IoT Dashboard</h1>
+            <p class="subtitle">  </p>
+            
+            <form id="login-form">
+                <div class="form-group">
+                    <label for="db-url">URL Database Firebase</label>
+                    <input type="url" id="db-url" placeholder="https://project-id.firebaseio.com" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="db-secret">Token / Database Secret</label>
+                    <input type="password" id="db-secret" placeholder="Masukkan token database" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="user-id">User ID</label>
+                    <input type="text" id="user-id" placeholder="contoh: latif, solaUI" required>
+                </div>
+				<!-- Tambahkan di dalam <form>, di atas User ID -->
+				<!-- WiFi Credentials - Side by Side -->
+				<div class="form-row">
+					<div class="form-group">
+						<label for="wifiSsid">📶 Nama WiFi (SSID)</label>
+						<input type="text" id="wifiSsid" placeholder="UMS Wifi" value="UMS Wifi" required>
+					</div>
+					<div class="form-group">
+						<label for="wifiPass"> Password WiFi</label>
+						<input type="password" id="wifiPass" placeholder="ums.wifi" value="ums.wifi" required>
+					</div>
+				</div>
+                
+                <button type="submit" class="login-btn">Masuk ke Dashboard</button>
+            </form>
+            
+            <div class="hint">
+                <strong>Catatan:</strong> Pastikan URL dan Token sudah benar. Data akan disiapkan otomatis jika User ID baru.
+            </div>
+        </div>
+    </div>
+
+    <!-- OVERLAY ANIMASI (Tersembunyi secara default) -->
+    <div id="loadingOverlay" class="loading-overlay hidden">
+        <div class="spinner"></div>
+        <p id="loadingText">Memverifikasi kredensial...</p>
+    </div>
+
+    <!-- Muat adduser.js DULUAN, baru login.js -->
+    <script src="adduser.js"></script>
+    <script src="login.js"></script>
+</body>
+</html>

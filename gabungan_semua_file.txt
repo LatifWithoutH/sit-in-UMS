@@ -1,0 +1,1932 @@
+// Struktur data default sesuai kebutuhan modul IoT
+const defaultDataStructure = {
+    gauge1: 0,
+    gauge2: 0,
+    gauge3: 0,
+    gauge4: 0,
+    hlevel1: 0,
+    hlevel2: 0,
+    indicator1: "--",
+    indicator2: "--",
+    indicator3: "--",
+    switch1: false,
+    switch2: false,
+    switch3: false,
+    switch4: false,
+    switch5: false
+};
+
+/**
+ * Fungsi untuk memastikan user ada di Firebase.
+ * Jika belum ada, akan dibuatkan struktur default.
+ * @param {string} dbUrl - URL Firebase
+ * @param {string} dbSecret - Token/Secret Firebase
+ * @param {string} userId - ID User
+ * @returns {Promise<boolean>} - True jika berhasil, throw error jika gagal
+ */
+async function ensureUserExists(dbUrl, dbSecret, userId) {
+    const cleanUrl = dbUrl.replace(/\/+$/, ""); // Hapus semua slash di akhir
+    
+    // 1. Cek apakah user sudah ada
+    const checkUrl = `${cleanUrl}/${userId}.json?auth=${dbSecret}`;
+    const checkResponse = await fetch(checkUrl);
+    
+    if (!checkResponse.ok) {
+        throw new Error("Gagal terhubung ke Firebase. Periksa URL dan Token.");
+    }
+    
+    const existingData = await checkResponse.json();
+    
+    // 2. Jika belum ada (null), buat struktur baru
+    if (existingData === null) {
+        console.log(`User '${userId}' belum ada. Membuat struktur default...`);
+        
+        const createResponse = await fetch(checkUrl, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(defaultDataStructure)
+        });
+        
+        if (!createResponse.ok) {
+            throw new Error("Gagal membuat struktur data di Firebase.");
+        }
+        console.log("Struktur default berhasil dibuat.");
+    } else {
+        console.log(`User '${userId}' sudah ada. Langsung diproses.`);
+    }
+    
+    return true;
+}
+// ==========================================
+// 1. SATPAM (GUARD): CEK LOGIN
+// ==========================================
+const dbUrl = localStorage.getItem('iot_db_url');
+const dbSecret = localStorage.getItem('iot_db_secret');
+const userId = localStorage.getItem('iot_user_id');
+
+if (!dbUrl || !dbSecret || !userId) {
+    window.location.href = 'login.html';
+}
+// ==========================================
+// HELPER: CEK VISIBILITAS WIDGET
+// ==========================================
+function isWidgetVisible(key) {
+    const savedSettings = JSON.parse(localStorage.getItem('iot_widget_visibility')) || {};
+    // Jika tidak ada di settings, tampilkan secara default
+    return savedSettings.hasOwnProperty(key) ? savedSettings[key] : true;
+}
+
+// Tampilkan User ID di Header (Tanpa Emot)
+const userDisplay = document.getElementById('user-display');
+if (userDisplay) {
+    userDisplay.textContent = `Pengguna: ${userId}`;
+}
+
+const container = document.getElementById('dynamic-dashboard');
+let pollingInterval = null;
+
+// ==========================================
+// HELPER: Mapping key ke label teks yang rapi (Tanpa Emot)
+// ==========================================
+function getHumanLabel(key) {
+    // Murni format string: ganti underscore dengan spasi, lalu kapitalisasi huruf pertama setiap kata
+    // Contoh: "suhu_kamar" -> "Suhu Kamar"
+    // Contoh: "gauge1" -> "Gauge1"
+    // Contoh: "sensor_cahaya_baru" -> "Sensor Cahaya Baru"
+    return key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+}
+
+// ==========================================
+// 2. FUNGSI KIRIM DATA (SAKELAR)
+// ==========================================
+function sendData(key, value) {
+    const cleanUrl = dbUrl.replace(/\/+$/, "");
+    const url = `${cleanUrl}/${userId}/${key}.json?auth=${dbSecret}`;
+    
+    fetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(value)
+    }).catch(err => console.error("Error mengirim data:", err));
+}
+
+// ==========================================
+// 3. FUNGSI UTAMA: AMBIL DATA & RENDER DINAMIS
+// ==========================================
+async function fetchAndRenderDashboard() {
+    try {
+        const cleanUrl = dbUrl.replace(/\/+$/, "");
+        const url = `${cleanUrl}/${userId}.json?auth=${dbSecret}`;
+        
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        
+        const data = await response.json();
+        if (!data) return;
+
+        // Hapus pesan loading jika ada
+        const loadingMsg = container.querySelector('.loading-text');
+        if (loadingMsg) loadingMsg.remove();
+
+        // LOOPING SEMUA DATA DI FIREBASE
+        // Di dalam fungsi fetchAndRenderDashboard, tepat setelah loop Object.keys(data).forEach(...)
+        Object.keys(data).forEach(key => {
+            // CEK VISIBILITAS DI SINI
+            if (!isWidgetVisible(key)) {
+                // Jika widget tidak boleh tampil, hapus dari DOM jika ada
+                const existingWidget = document.getElementById(`widget-${key}`);
+                if (existingWidget) existingWidget.remove();
+                return; // Skip proses rendering
+            }
+        
+            const value = data[key];
+            const type = typeof value;
+            
+            // Cek apakah widget sudah ada di layar
+            let widgetEl = document.getElementById(`widget-${key}`);
+
+            // Jika BELUM ADA, buat widget baru berdasarkan TIPE DATA
+            if (!widgetEl) {
+                let html = '';
+                
+                if (type === 'boolean') {
+                    html = createSwitchWidget(key, value);
+                } 
+                else if (type === 'number') {
+                    if (key.includes('hlevel') || key.includes('jarak') || key.includes('ketinggian')) {
+                        html = createHLevelWidget(key, value);
+                    } else {
+                        html = createGaugeWidget(key, value);
+                    }
+                } 
+                else if (type === 'string') {
+                    html = createIndicatorWidget(key, value);
+                }
+
+                if (html) {
+                    container.insertAdjacentHTML('beforeend', html);
+                    widgetEl = document.getElementById(`widget-${key}`);
+                }
+            }
+
+            // UPDATE NILAI (Anti-Flicker: hanya update isi, bukan recreate)
+            if (widgetEl) {
+                updateWidgetValue(widgetEl, key, value, type);
+            }
+		
+
+
+        });
+
+    } catch (error) {
+        console.error("Gagal mengambil data:", error);
+    }
+}
+
+// ==========================================
+// 4. PABRIK WIDGET (TEMPLATE HTML - TANPA EMOT)
+// ==========================================
+function createGaugeWidget(key, value) {
+    const numValue = typeof value === 'number' ? value : 0;
+    const percentage = Math.min((numValue / 100) * 100, 100);
+    const offset = 283 - (283 * percentage / 100);
+    const label = getHumanLabel(key);
+    
+    return `
+    <div class="widget gauge-widget" id="widget-${key}">
+        <div class="widget-header">
+            <span class="widget-title">${label}</span>
+            <span class="widget-value">${numValue}</span>
+        </div>
+        <div class="gauge-container">
+            <div class="gauge-circle">
+                <svg viewBox="0 0 100 100">
+                    <circle cx="50" cy="50" r="45" class="gauge-bg"/>
+                    <circle cx="50" cy="50" r="45" class="gauge-fill" style="stroke-dashoffset: ${offset};"></circle>
+                </svg>
+                <div class="gauge-text">
+                    <span>${numValue}</span>
+                    <small>unit</small>
+                </div>
+            </div>
+        </div>
+    </div>`;
+}
+
+function createHLevelWidget(key, value) {
+    const numValue = typeof value === 'number' ? value : 0;
+    const percentage = Math.min((numValue / 200) * 100, 100);
+    const label = getHumanLabel(key);
+    
+    return `
+    <div class="widget hlevel-widget" id="widget-${key}">
+        <div class="widget-header">
+            <span class="widget-title">${label}</span>
+            <span class="widget-value">${numValue}</span>
+        </div>
+        <div class="hlevel-bar">
+            <div class="hlevel-fill" style="width: ${percentage}%;"></div>
+        </div>
+        <div class="hlevel-label">
+            <span>0</span>
+            <span>${numValue}</span>
+            <span>Maks</span>
+        </div>
+    </div>`;
+}
+
+function createIndicatorWidget(key, value) {
+    const label = getHumanLabel(key);
+    return `
+    <div class="widget indicator-widget" id="widget-${key}">
+        <div class="widget-header">
+            <span class="widget-title">${label}</span>
+        </div>
+        <div class="indicator-content">
+            <span class="indicator-text">${value}</span>
+        </div>
+    </div>`;
+}
+
+function createSwitchWidget(key, value) {
+    const isChecked = (value === true || value === "true") ? 'checked' : '';
+    const label = getHumanLabel(key);
+    
+    return `
+    <div class="widget switch-widget" id="widget-${key}">
+        <div class="widget-header">
+            <span class="widget-title">${label}</span>
+        </div>
+        <div class="switch-container">
+            <label class="switch">
+                <input type="checkbox" id="toggle-${key}" ${isChecked}>
+                <span class="slider"></span>
+            </label>
+        </div>
+    </div>`;
+}
+
+// ==========================================
+// 5. FUNGSI UPDATE NILAI (ANTI-FLICKER)
+// ==========================================
+function updateWidgetValue(widgetEl, key, value, type) {
+    if (type === 'number') {
+        const numValue = typeof value === 'number' ? value : 0;
+        
+        if (widgetEl.classList.contains('gauge-widget')) {
+            const percentage = Math.min((numValue / 100) * 100, 100);
+            const offset = 283 - (283 * percentage / 100);
+            const circle = widgetEl.querySelector('.gauge-fill');
+            const text = widgetEl.querySelector('.gauge-text span');
+            const valDisplay = widgetEl.querySelector('.widget-value');
+            
+            if (circle) circle.style.strokeDashoffset = offset;
+            if (text) text.textContent = numValue;
+            if (valDisplay) valDisplay.textContent = numValue;
+        } 
+        else if (widgetEl.classList.contains('hlevel-widget')) {
+            const percentage = Math.min((numValue / 200) * 100, 100);
+            const fill = widgetEl.querySelector('.hlevel-fill');
+            const text = widgetEl.querySelector('.hlevel-label span:nth-child(2)');
+            const valDisplay = widgetEl.querySelector('.widget-value');
+            
+            if (fill) fill.style.width = `${percentage}%`;
+            if (text) text.textContent = numValue;
+            if (valDisplay) valDisplay.textContent = numValue;
+        }
+    } 
+    else if (type === 'string') {
+        const text = widgetEl.querySelector('.indicator-text');
+        if (text) text.textContent = value;
+    } 
+    else if (type === 'boolean') {
+        const toggle = widgetEl.querySelector('input[type="checkbox"]');
+        if (toggle) {
+            const isChecked = (value === true || value === "true");
+            if (toggle.checked !== isChecked) {
+                toggle.checked = isChecked;
+            }
+        }
+    }
+}
+
+// ==========================================
+// 6. EVENT DELEGATION (Sakelar)
+// ==========================================
+container.addEventListener('change', (e) => {
+    if (e.target.matches('input[type="checkbox"]')) {
+        const key = e.target.id.replace('toggle-', '');
+        sendData(key, e.target.checked);
+    }
+});
+
+// ==========================================
+// 7. LOGOUT
+// ==========================================
+function logout() {
+    console.log("Logout diklik!");
+    localStorage.removeItem('iot_db_url');
+    localStorage.removeItem('iot_db_secret');
+    localStorage.removeItem('iot_user_id');
+    if (pollingInterval) clearInterval(pollingInterval);
+    window.location.href = 'login.html';
+}
+
+const logoutBtn = document.getElementById('logoutBtn');
+if (logoutBtn) {
+    logoutBtn.addEventListener('click', logout);
+}
+
+// ==========================================
+// 8. JALANKAN SAAT HALAMAN DIMUAT
+// ==========================================
+console.log("Dashboard diinisialisasi untuk pengguna:", userId);
+fetchAndRenderDashboard(); // Panggil sekali di awal
+
+// Polling setiap 3 detik
+pollingInterval = setInterval(fetchAndRenderDashboard, 3000);
+
+// ==========================================
+// FUNGSI DOWNLOAD KODE ARDUINO OTOMATIS
+// ==========================================
+function downloadArduinoCode() {
+    const moduleKey = document.getElementById('moduleSelect').value;
+    
+    // 1. Validasi
+    if (!moduleKey) {
+        alert('⚠️ Silakan pilih modul terlebih dahulu!');
+        return;
+    }
+    if (!ARDUINO_TEMPLATES[moduleKey]) {
+        alert('❌ Template kode untuk modul ini belum tersedia.');
+        return;
+    }
+
+    // 2. Ambil data user dari LocalStorage
+    const wifiSsid = localStorage.getItem('iot_wifi_ssid') || 'UMS Wifi';
+    const wifiPass = localStorage.getItem('iot_wifi_pass') || 'ums.wifi';
+    const dbUrl = localStorage.getItem('iot_db_url');
+    const dbSecret = localStorage.getItem('iot_db_secret');
+    const userId = localStorage.getItem('iot_user_id');
+
+    // 3. Racik Kode (Replace Placeholder)
+    let finalCode = ARDUINO_TEMPLATES[moduleKey];
+    finalCode = finalCode.replaceAll('{{WIFI_SSID}}', wifiSsid);
+    finalCode = finalCode.replaceAll('{{WIFI_PASSWORD}}', wifiPass);
+    finalCode = finalCode.replaceAll('{{DATABASE_URL}}', dbUrl);
+    finalCode = finalCode.replaceAll('{{API_KEY}}', dbSecret);
+    finalCode = finalCode.replaceAll('{{USER_ID}}', userId);
+
+    // 4. Buat File Blob dan Trigger Download
+    const blob = new Blob([finalCode], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    
+    // Nama file otomatis: modul04_latif_2023-10-25.ino
+    const date = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `${moduleKey}_${userId}_${date}.ino`;
+    
+    document.body.appendChild(a);
+    a.click(); // Eksekusi download
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url); // Bersihkan memori
+    
+    console.log(`✅ Kode ${moduleKey} berhasil diracik dan diunduh!`);
+}
+// ==========================================
+// FUNGSI AUTO-POPULATE DROPDOWN MODUL
+// ==========================================
+function populateModuleDropdown() {
+    const select = document.getElementById('moduleSelect');
+    if (!select || typeof ARDUINO_TEMPLATES === 'undefined') return;
+    
+    // Hapus semua opsi kecuali yang pertama (default)
+    while (select.options.length > 1) {
+        select.remove(1);
+    }
+    
+    // Mapping label yang rapi untuk setiap key modul
+    const moduleLabels = {
+        "modul04": "Modul 04 - LED, Buzzer, Relay",
+        "modul05LCD": "Modul 05 - LCD 16x2 I2C",
+        "modul05OLED": "Modul 05 - OLED Display 128x64",
+        "modul06LDR": "Modul 06 - Sensor Cahaya LDR",
+        "modul06BH1750": "Modul 06 - Sensor Cahaya BH1750",
+        "modul06POTENSI": "Modul 06 - Potensiometer",
+        "modul07DHT": "Modul 07 - DHT11 (Suhu & Kelembaban)",
+        "modul08": "Modul 08 - BMP180 (Cuaca & Ketinggian)",
+        "modul09": "Modul 09 - Smart Agriculture (Tanah/Hujan)",
+        "modul10PIR": "Modul 10 - Sensor PIR (Gerakan)",
+        "modul10BAG02": "Modul 10 - Sensor Ultrasonik (Jarak)",
+        "modul11": "Modul 11 - Motor Servo",
+        "modul12": "Modul 12 - RFID MFRC522",
+        "modul13REG": "Modul 13 - Fingerprint (Enroll/Daftar)",
+        "modul13READ": "Modul 13 - Fingerprint (Read/Verifikasi)",
+        "modul13DEL": "Modul 13 - Fingerprint (Delete/Hapus)",
+        "modul14": "Modul 14 - Sensor Gesture APDS9960"
+    };
+    
+    // Loop semua keys di ARDUINO_TEMPLATES dan buat option
+    Object.keys(ARDUINO_TEMPLATES).forEach(key => {
+        const option = document.createElement('option');
+        option.value = key;
+        // Pakai label dari mapping, kalau tidak ada pakai key-nya langsung
+        option.textContent = moduleLabels[key] || key;
+        select.appendChild(option);
+    });
+    
+    console.log(`✅ Dropdown modul terisi: ${Object.keys(ARDUINO_TEMPLATES).length} modul tersedia`);
+}
+
+// Panggil fungsi ini saat halaman dimuat
+// Tambahkan di bagian paling bawah dashboard.js, setelah pollingInterval:
+populateModuleDropdown();
+
+// ==========================================
+// FUNGSI DOWNLOAD SEMUA MODUL (.ZIP)
+// ==========================================
+async function downloadAllModules() {
+    const statusEl = document.getElementById('download-status');
+    statusEl.style.display = 'block';
+    statusEl.textContent = '⏳ Sedang meracik file ZIP... Mohon tunggu.';
+
+    try {
+        // 1. Ambil data user dari LocalStorage
+        const wifiSsid = localStorage.getItem('iot_wifi_ssid') || 'UMS Wifi';
+        const wifiPass = localStorage.getItem('iot_wifi_pass') || 'ums.wifi';
+        const dbUrl = localStorage.getItem('iot_db_url');
+        const dbSecret = localStorage.getItem('iot_db_secret');
+        const userId = localStorage.getItem('iot_user_id');
+
+        // 2. Inisialisasi JSZip
+        const zip = new JSZip();
+
+        // 3. Mapping struktur folder agar sesuai dengan file 'semua_modul.txt' kamu
+        const folderStructure = {
+            "modul04": "modul04/modul04.ino",
+            "modul05LCD": "modul05/modul05LCD.ino",
+            "modul05OLED": "modul05/modul05OLED.ino",
+            "modul06BH1750": "modul06/modul06BH1750.ino",
+            "modul06LDR": "modul06/modul06LDR.ino",
+            "modul06POTENSI": "modul06/modul06POTENSI.ino",
+            "modul07DHT": "modul07/modul07DHT.ino",
+            "modul08": "modul08/modul08.ino",
+            "modul09": "modul09/modul09.ino",
+            "modul10BAG02": "modul10/modul10BAG02.ino",
+            "modul10PIR": "modul10/modul10PIR.ino",
+            "modul11": "modul11/modul11.ino",
+            "modul12": "modul12/modul12.ino",
+            "modul13DEL": "modul13/modul13DEL.ino",
+            "modul13READ": "modul13/modul13READ.ino",
+            "modul13REG": "modul13/modul13REG.ino",
+            "modul14": "modul14/modul14.ino"
+        };
+
+        // 4. Loop semua template, replace variabel, dan masukkan ke ZIP
+        for (const [key, template] of Object.entries(ARDUINO_TEMPLATES)) {
+            let finalCode = template
+                .replaceAll('{{WIFI_SSID}}', wifiSsid)
+                .replaceAll('{{WIFI_PASSWORD}}', wifiPass)
+                .replaceAll('{{DATABASE_URL}}', dbUrl)
+                .replaceAll('{{API_KEY}}', dbSecret)
+                .replaceAll('{{USER_ID}}', userId);
+
+            // Tentukan nama file & folder. Jika tidak ada di mapping, pakai default
+            const filePath = folderStructure[key] || `${key}/${key}.ino`;
+            
+            // Tambahkan file ke dalam objek ZIP
+            zip.file(filePath, finalCode);
+        }
+
+        // 5. Generate file ZIP secara asynchronous
+        const content = await zip.generateAsync({ type: "blob" });
+        
+        // 6. Trigger download menggunakan FileSaver.js
+        const date = new Date().toISOString().slice(0, 10);
+        saveAs(content, `Kode_Arduino_Lengkap_${userId}_${date}.zip`);
+
+        statusEl.textContent = '✅ Berhasil! File ZIP telah diunduh.';
+        setTimeout(() => { statusEl.style.display = 'none'; }, 3000);
+
+    } catch (error) {
+        console.error("Gagal membuat ZIP:", error);
+        statusEl.textContent = '❌ Gagal membuat file ZIP. Cek console untuk detail.';
+        statusEl.style.color = 'var(--danger)';
+    }
+}const loginForm = document.getElementById('login-form');
+const loadingOverlay = document.getElementById('loadingOverlay');
+const loadingText = document.getElementById('loadingText');
+
+// Fungsi helper untuk jeda waktu (agar animasi "Berhasil" sempat terbaca)
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Cek jika sudah login, langsung lempar ke dashboard
+if (localStorage.getItem('iot_db_url') && localStorage.getItem('iot_db_secret')) {
+    window.location.href = 'dashboard.html';
+}
+
+loginForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    // 1. Ambil nilai dari form (TANPA .toLowerCase())
+    const dbUrl = document.getElementById('db-url').value.trim();
+    const dbSecret = document.getElementById('db-secret').value.trim();
+    const userId = document.getElementById('user-id').value.trim(); // <-- PERUBAHAN DI SINI
+	// Di dalam event listener submit form login:
+	const wifiSsid = document.getElementById('wifiSsid').value;
+	const wifiPass = document.getElementById('wifiPass').value;
+
+	localStorage.setItem('iot_wifi_ssid', wifiSsid);
+	localStorage.setItem('iot_wifi_pass', wifiPass);
+	// ... (lanjut simpan dbUrl, dbSecret, userId seperti biasa)
+
+    if (!userId || !dbUrl || !dbSecret) {
+        alert("Mohon lengkapi semua field!");
+        return;
+    }
+
+    // 2. Tampilkan Animasi "Menunggu"
+    loadingOverlay.classList.remove('hidden');
+    loadingText.textContent = "Memverifikasi kredensial...";
+
+    try {
+        // 3. Panggil fungsi dari adduser.js
+        await ensureUserExists(dbUrl, dbSecret, userId);
+        
+        // 4. Animasi "Selesai"
+        loadingText.textContent = "Berhasil! Mengalihkan ke dashboard...";
+        
+        // Tunggu 1.2 detik agar user sempat membaca pesan sukses
+        await delay(1200);
+        
+        // 5. Simpan ke LocalStorage
+        localStorage.setItem('iot_db_url', dbUrl);
+        localStorage.setItem('iot_db_secret', dbSecret);
+        localStorage.setItem('iot_user_id', userId);
+
+        // 6. Pindah ke Dashboard
+        window.location.href = 'dashboard.html';
+
+    } catch (error) {
+        console.error("Login Error:", error);
+        // Sembunyikan animasi jika error
+        loadingOverlay.classList.add('hidden');
+        alert(`Gagal Login: ${error.message}`);
+    }
+});// ==========================================
+// 1. INISIALISASI & CEK LOGIN
+// ==========================================
+const dbUrl = localStorage.getItem('iot_db_url');
+const dbSecret = localStorage.getItem('iot_db_secret');
+const userId = localStorage.getItem('iot_user_id');
+
+if (!dbUrl || !dbSecret || !userId) {
+    window.location.href = 'index.html'; // Atau 'login.html' jika belum di-rename
+}
+
+const container = document.getElementById('dynamic-settings-container');
+const backBtn = document.getElementById('backBtn');
+const saveBtn = document.getElementById('saveBtn');
+const STORAGE_KEY = 'iot_widget_visibility';
+// ==========================================
+// 2. HELPER: FORMAT LABEL MURNI DINAMIS (TANPA MAPPING)
+// ==========================================
+function getHumanLabel(key) {
+    // Murni format string: ganti underscore dengan spasi, lalu kapitalisasi huruf pertama setiap kata
+    // Contoh: "suhu_kamar" -> "Suhu Kamar"
+    // Contoh: "gauge1" -> "Gauge1"
+    // Contoh: "sensor_cahaya_baru" -> "Sensor Cahaya Baru"
+    return key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+}
+
+function getWidgetType(key, value) {
+    if (typeof value === 'boolean') return 'switch';
+    if (typeof value === 'string') return 'indicator';
+    if (typeof value === 'number') {
+        return key.toLowerCase().includes('hlevel') ? 'hlevel' : 'gauge';
+    }
+    return 'unknown';
+}
+// ==========================================
+// 3. FUNGSI UTAMA: AMBIL DATA DARI FIREBASE & RENDER
+// ==========================================
+async function loadDynamicSettings() {
+    try {
+        const cleanUrl = dbUrl.replace(/\/+$/, "");
+        const url = `${cleanUrl}/${userId}.json?auth=${dbSecret}`;
+        
+        const response = await fetch(url);
+        if (!response.ok) throw new Error("Gagal terhubung ke Firebase");
+        
+        const data = await response.json();
+        if (!data) {
+            container.innerHTML = '<p class="empty-state">Belum ada data widget untuk user ini.</p>';
+            return;
+        }
+
+        // Kelompokkan widget berdasarkan tipe
+        const groups = { gauge: [], hlevel: [], indicator: [], switch: [] };
+        
+        for (const [key, value] of Object.entries(data)) {
+            const type = getWidgetType(key, value);
+            if (groups[type]) {
+                groups[type].push(key);
+            }
+        }
+
+        // Render HTML (Hapus loading state)
+        container.innerHTML = ''; 
+        
+        // Urutan render kelompok
+        const order = ['gauge', 'hlevel', 'indicator', 'switch'];
+        const titles = { 
+            gauge: 'Gauge (Data Angka)', 
+            hlevel: 'Horizontal Level', 
+            indicator: 'Indikator (Teks)', 
+            switch: 'Sakelar (Kontrol)' 
+        };
+
+        order.forEach(type => {
+            if (groups[type].length > 0) {
+                const groupHtml = createGroupHtml(type, titles[type], groups[type]);
+                container.insertAdjacentHTML('beforeend', groupHtml);
+            }
+        });
+
+        // Terapkan preferensi visibilitas yang sudah tersimpan sebelumnya
+        applySavedPreferences();
+
+    } catch (error) {
+        container.innerHTML = `<p class="error-state">Error: ${error.message}</p>`;
+    }
+}
+
+// ==========================================
+// 4. PEMBUAT HTML (TANPA KURUNG KECIL)
+// ==========================================
+function createGroupHtml(type, title, keys) {
+    let itemsHtml = keys.map(key => {
+        const label = getHumanLabel(key);
+        return `
+        <label class="checkbox-label">
+            <input type="checkbox" data-widget="${key}" class="widget-checkbox">
+            <span>${label}</span>
+        </label>`;
+    }).join('');
+
+    return `
+    <div class="widget-group">
+        <h3>${title}</h3>
+        <div class="widget-grid">
+            ${itemsHtml}
+        </div>
+    </div>`;
+}
+
+function applySavedPreferences() {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+    document.querySelectorAll('.widget-checkbox').forEach(cb => {
+        const key = cb.getAttribute('data-widget');
+        // Default: tampilkan (checked = true) jika belum pernah diatur
+        cb.checked = saved.hasOwnProperty(key) ? saved[key] : true; 
+    });
+}
+
+// ==========================================
+// 5. EVENT LISTENERS
+// ==========================================
+saveBtn.addEventListener('click', () => {
+    const settings = {};
+    document.querySelectorAll('.widget-checkbox').forEach(cb => {
+        settings[cb.getAttribute('data-widget')] = cb.checked;
+    });
+    
+    // Simpan ke LocalStorage
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    
+    // Feedback visual
+    const originalText = saveBtn.textContent;
+    saveBtn.textContent = 'Tersimpan!';
+    
+    setTimeout(() => {
+        window.location.href = 'dashboard.html';
+    }, 800);
+});
+
+backBtn.addEventListener('click', () => {
+    window.location.href = 'dashboard.html';
+});
+
+// Jalankan saat halaman dimuat
+loadDynamicSettings();// ============================================
+// AUTO-GENERATED ARDUINO TEMPLATES
+// Jangan edit file ini secara manual. Jalankan generate_templates.py
+// ============================================
+
+const ARDUINO_TEMPLATES = {
+    "modul04": `// ============================================\n// MODUL 04 - KENDALI OUTPUT DIGITAL\n// LED, Buzzer, Relay via Firebase & IoT KIT\n// ============================================\n\n// Library\n#include <ESP8266WiFi.h>\n#include <FirebaseESP8266.h>\n\n// ====== KONFIGURASI (WAJIB DIGANTI!) ======\n#define WIFI_SSID      "{{WIFI_SSID}}"\n#define WIFI_PASSWORD  "{{WIFI_PASSWORD}}"\n\n#define DATABASE_URL   "{{DATABASE_URL}}"\n#define API_KEY        "{{API_KEY}}"\n\n// ====== OBJEK & VARIABEL ======\nFirebaseData fbdo;\nString user = "{{USER_ID}}";\n\n// ====== PIN KOMPONEN ======\n#define LED_PIN   D0   // LED terhubung ke D0\n#define BUZZ_PIN  D1   // Buzzer terhubung ke D1\n#define RELAY_PIN D2   // Relay terhubung ke D2\n\n\n// ============================================\nvoid setup() {\n  // Inisialisasi Serial Monitor\n  Serial.begin(115200);\n  Serial.println();\n  Serial.println("=== MODUL 04 - Kendali Output Digital ===");\n\n  // Set pin sebagai OUTPUT\n  pinMode(LED_PIN,   OUTPUT);\n  pinMode(BUZZ_PIN,  OUTPUT);\n  pinMode(RELAY_PIN, OUTPUT);\n\n  // Pastikan semua output MATI di awal\n  digitalWrite(LED_PIN,   LOW);\n  digitalWrite(BUZZ_PIN,  LOW);\n  digitalWrite(RELAY_PIN, LOW);\n\n  // Koneksi ke WiFi\n  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);\n  Serial.print("Connecting to Wi-Fi");\n  while (WiFi.status() != WL_CONNECTED) {\n    Serial.print(".");\n    delay(300);\n  }\n  Serial.println();\n  Serial.print("Connected! IP: ");\n  Serial.println(WiFi.localIP());\n  Serial.println();\n\n  // Koneksi ke Firebase\n  Serial.printf("Firebase Client v%s\\n\\n", FIREBASE_CLIENT_VERSION);\n  Firebase.begin(DATABASE_URL, API_KEY);\n  Firebase.reconnectWiFi(true);\n}\n\n// ============================================\nvoid loop() {\n  // --- KENDALI LED (switch1) ---\n  if (Firebase.getString(fbdo, "/" + user + "/switch1")) {\n    if (fbdo.to<bool>() == true) {\n      digitalWrite(LED_PIN, HIGH);\n      Serial.println("LED ON");\n    } else {\n      digitalWrite(LED_PIN, LOW);\n      Serial.println("LED OFF");\n    }\n  }\n\n  // --- KENDALI BUZZER (switch2) ---\n  if (Firebase.getString(fbdo, "/" + user + "/switch2")) {\n    if (fbdo.to<bool>() == true) {\n      digitalWrite(BUZZ_PIN, HIGH);\n      Serial.println("Buzzer ON");\n    } else {\n      digitalWrite(BUZZ_PIN, LOW);\n      Serial.println("Buzzer OFF");\n    }\n  }\n\n  // --- KENDALI RELAY (switch3) ---\n  if (Firebase.getString(fbdo, "/" + user + "/switch3")) {\n    if (fbdo.to<bool>() == true) {\n      digitalWrite(RELAY_PIN, HIGH);\n      Serial.println("Relay ON");\n    } else {\n      digitalWrite(RELAY_PIN, LOW);\n      Serial.println("Relay OFF");\n    }\n  }\n}\n`,
+    "modul05LCD": `// ============================================\n// MODUL 05 BAGIAN 1 - LCD 16x2 I2C\n// ============================================\n\n#include <ESP8266WiFi.h>\n#include <FirebaseESP8266.h>\n#include <Wire.h>\n#include <LiquidCrystal_I2C.h>\n\n#define WIFI_SSID      "{{WIFI_SSID}}"\n#define WIFI_PASSWORD  "{{WIFI_PASSWORD}}"\n#define DATABASE_URL   "{{DATABASE_URL}}"\n#define API_KEY        "{{API_KEY}}"\n\nFirebaseData fbdo;\nLiquidCrystal_I2C lcd(0x27, 16, 2);\nString user = "{{USER_ID}}";\n\nvoid setup() {\n  Serial.begin(115200);\n\n  lcd.init();\n  lcd.backlight();\n  lcd.setCursor(0, 0);\n  lcd.print("Trainer Kit IoT");\n  lcd.setCursor(0, 1);\n  lcd.print("Connecting-WiFi");\n\n  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);\n  Serial.print("Connecting to Wi-Fi");\n  while (WiFi.status() != WL_CONNECTED) {\n    Serial.print(".");\n    delay(300);\n  }\n  Serial.println();\n  Serial.print("Connected with IP: ");\n  Serial.println(WiFi.localIP());\n  Serial.println();\n\n  // Perbaikan: Menghapus backslash ganda pada \\n\n  Serial.printf("Firebase Client v%s\\\n\\\n", FIREBASE_CLIENT_VERSION);\n  Firebase.begin(DATABASE_URL, API_KEY);\n  Firebase.reconnectWiFi(true);\n\n  delay(2000);\n  lcd.clear();\n}\n\nvoid loop() {\n  lcd.setCursor(0, 0);\n  lcd.print("Menampilkan Teks");\n\n  // Perbaikan: Menggunakan getBool() jika data di Firebase berupa true/false\n  if (Firebase.getBool(fbdo, "/" + user + "/switch1")) {\n    lcd.setCursor(0, 1);\n    // Perbaikan: Menggunakan boolData()\n    if (fbdo.boolData() == true) {\n      lcd.print("Data Sakelar ON ");\n    } else {\n      lcd.print("Data Sakelar OFF");\n    }\n  } else {\n    // Tampilkan alasan error di Serial Monitor jika gagal baca\n    lcd.setCursor(0, 1);\n    lcd.print("Gagal baca data ");\n    Serial.println(fbdo.errorReason());\n  }\n  \n  // Perbaikan Fatal: Wajib ada delay agar tidak spam request ke Firebase!\n  delay(1000); \n}\n`,
+    "modul05OLED": `// ============================================\n// MODUL 05 BAGIAN 2 - OLED DISPLAY 128x64\n// ============================================\n\n// Library \n#include <ESP8266WiFi.h>\n#include <FirebaseESP8266.h>\n#include <Wire.h>\n#include <Adafruit_GFX.h>\n#include <Adafruit_SSD1306.h>\n\n\n// ====== KONFIGURASI OLED ======\n#define SCREEN_WIDTH 128\n#define SCREEN_HEIGHT 64\n#define OLED_RESET -1\n// Inisialisasi objek OLED dengan resolusi 128x64\nAdafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);\n\n// ====== KONFIGURASI (WAJIB DIGANTI!) ======\n#define WIFI_SSID      "{{WIFI_SSID}}"\n#define WIFI_PASSWORD  "{{WIFI_PASSWORD}}"\n\n#define DATABASE_URL   "{{DATABASE_URL}}"\n#define API_KEY        "{{API_KEY}}"\n\n// ====== OBJEK & VARIABEL ======\nFirebaseData fbdo;\nString user = "{{USER_ID}}";\n\n// ============================================\nvoid setup() {\n  Serial.begin(115200);\n  \n  // Inisialisasi OLED (Alamat I2C default 0x3C)\n  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);\n  display.clearDisplay(); // Bersihkan layar di awal\n\n  // Koneksi ke WiFi\n  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);\n  Serial.print("Connecting to Wi-Fi");\n  while (WiFi.status() != WL_CONNECTED) {\n    Serial.print(".");\n    delay(300);\n  }\n  Serial.println();\n  Serial.print("Connected with IP: ");\n  Serial.println(WiFi.localIP());\n  Serial.println();\n\n  // Koneksi ke Firebase\n  Serial.printf("Firebase Client v%s\\n\\n", FIREBASE_CLIENT_VERSION);\n  Firebase.begin(DATABASE_URL, API_KEY);\n  Firebase.reconnectWiFi(true);\n}\n\n// ============================================\nvoid loop() {\n  // --- Teks Judul (Ukuran 1) ---\n  display.setTextSize(1);\n  display.setTextColor(SSD1306_WHITE); // Gunakan SSD1306_WHITE atau WHITE\n  display.setCursor(1, 1);\n  display.print("Trainer IoT");\n\n  // --- Membaca status switch1 dari Firebase ---\n  if (Firebase.getString(fbdo, "/" + user + "/switch1")) {\n    display.setTextSize(2);\n    display.setTextColor(SSD1306_WHITE);\n    display.setCursor(1, 25);\n    \n    if (fbdo.to<bool>() == true) {\n      display.print("Data ON");\n    } else {\n      display.print("Data OFF");\n    }\n  }\n\n  // --- WAJIB: Tampilkan buffer ke layar, lalu bersihkan ---\n  display.display();       // Menampilkan apa yang sudah di-draw di buffer\n  display.clearDisplay();  // Membersihkan buffer untuk refresh berikutnya\n}\n`,
+    "modul06BH1750": `// ============================================\n// MODUL 06 BAGIAN 2 - SENSOR CAHAYA BH1750\n// ============================================\n\n// Library ESP8266 WiFi dan Firebase\n#include <ESP8266WiFi.h>\n#include <FirebaseESP8266.h>\n\n// Library I2C, LCD, dan Sensor BH1750\n#include <Wire.h>\n#include <LiquidCrystal_I2C.h>\n#include <BH1750.h>\n\n// ====== KONFIGURASI (WAJIB DIGANTI!) ======\n#define WIFI_SSID      "{{WIFI_SSID}}"\n#define WIFI_PASSWORD  "{{WIFI_PASSWORD}}"\n\n#define DATABASE_URL   "{{DATABASE_URL}}"\n#define API_KEY        "{{API_KEY}}"\n\n// ====== OBJEK & VARIABEL ======\nFirebaseData fbdo;\nLiquidCrystal_I2C lcd(0x27, 16, 2); // Alamat I2C LCD biasanya 0x27\nBH1750 lightMeter;\nString user = "{{USER_ID}}";\n\nunsigned int lux;\nchar light[16];\n\n// ============================================\nvoid setup() {\n  Serial.begin(115200);\n\n  // Inisialisasi I2C dan Sensor BH1750\n  Wire.begin();\n  lightMeter.begin();\n\n  // Inisialisasi LCD\n  lcd.init();\n  lcd.backlight();\n  lcd.setCursor(0, 0); lcd.print("Trainer Kit IoT");\n  lcd.setCursor(0, 1); lcd.print("Connecting-WiFi");\n\n  // Koneksi ke WiFi\n  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);\n  Serial.print("Connecting to Wi-Fi");\n  while (WiFi.status() != WL_CONNECTED) {\n    Serial.print(".");\n    delay(300);\n  }\n  Serial.println();\n  Serial.print("Connected with IP: ");\n  Serial.println(WiFi.localIP());\n  Serial.println();\n\n  // Koneksi ke Firebase\n  Firebase.begin(DATABASE_URL, API_KEY);\n  Firebase.reconnectWiFi(true);\n\n  delay(2000);\n  lcd.clear();\n}\n\n// ============================================\nvoid loop() {\n  // Membaca intensitas cahaya dalam satuan Lux\n  lux = lightMeter.readLightLevel();\n\n  // Format teks untuk ditampilkan di LCD\n  sprintf(light, "LIGHT:%5d lx", lux);\n  lcd.setCursor(0, 0); lcd.print("Light Meter(lx)");\n  lcd.setCursor(0, 1); lcd.print(light);\n\n  // Print ke Serial Monitor\n  Serial.print("Cahaya: ");\n  Serial.print(lux);\n  Serial.println(" lx");\n\n  // Kirim data ke Gauge 1 di Firebase\n  Firebase.setInt(fbdo, "/" + user + "/gauge1", lux);\n\n  delay(150); // Jeda agar perubahan nilai lebih halus\n}\n`,
+    "modul06LDR": `// ============================================\n// MODUL 06 BAGIAN 1 - SENSOR CAHAYA ANALOG (LDR)\n// ============================================\n#include <ESP8266WiFi.h>\n#include <FirebaseESP8266.h>\n#include <Wire.h>\n#include <LiquidCrystal_I2C.h>\n\n// ====== KONFIGURASI (WAJIB DIGANTI!) ======\n#define WIFI_SSID      "{{WIFI_SSID}}"\n#define WIFI_PASSWORD  "{{WIFI_PASSWORD}}"\n\n#define DATABASE_URL   "{{DATABASE_URL}}"\n#define API_KEY        "{{API_KEY}}"\n\n// ====== PIN & OBJEK ======\n#define LS_PIN A0 // Pin sensor cahaya LDR/Photodiode\n\nFirebaseData fbdo;\nLiquidCrystal_I2C lcd(0x27, 16, 2);\nString user = "{{USER_ID}}";\n\nint ls_adc, ls_value;\nchar ls_data[16];\n\n// ============================================\nvoid setup() {\n  Serial.begin(115200);\n\n  lcd.init();\n  lcd.backlight();\n  lcd.setCursor(0, 0); lcd.print("Trainer Kit IoT");\n  lcd.setCursor(0, 1); lcd.print("Connecting-WiFi");\n\n  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);\n  Serial.print("Connecting to Wi-Fi");\n  while (WiFi.status() != WL_CONNECTED) {\n    Serial.print("."); delay(300);\n  }\n  Serial.println("Connected with IP: " + WiFi.localIP().toString());\n\n  Firebase.begin(DATABASE_URL, API_KEY);\n  Firebase.reconnectWiFi(true);\n\n  delay(2000);\n  lcd.clear();\n}\n\n// ============================================\nvoid loop() {\n  ls_adc = analogRead(LS_PIN);\n  // Konversi nilai ADC (0-1024) menjadi persentase (0-100%)\n  ls_value = map(ls_adc, 0, 1024, 0, 100); \n\n  Serial.print("Cahaya: " + String(ls_value) + "%\\n");\n\n  // Kirim data ke Gauge 1 di Firebase\n  Firebase.setInt(fbdo, "/" + user + "/gauge1", ls_value);\n\n  // Tampilkan di LCD\n  lcd.setCursor(0, 0); lcd.print("Light Sensor(%)");\n  lcd.setCursor(0, 1);\n  sprintf(ls_data, "LS:%3d", ls_value);\n  lcd.print(ls_data);\n\n  delay(150); // Jeda agar perubahan nilai lebih halus\n}\n`,
+    "modul06POTENSI": `// ============================================\n// MODUL POTENSIOMETER (Modul 6 Bag 3 / Modul 12)\n// Membaca ADC Potensiometer & Tampil di OLED\n// ============================================\n\n// Library ESP8266 WiFi dan Firebase\n#include <ESP8266WiFi.h>\n#include <FirebaseESP8266.h>\n\n// Library OLED Display (I2C)\n#include <Wire.h>\n#include <Adafruit_GFX.h>\n#include <Adafruit_SSD1306.h>\n\n// ====== KONFIGURASI OLED ======\n#define SCREEN_WIDTH 128\n#define SCREEN_HEIGHT 64\n#define OLED_RESET -1\nAdafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);\n\n/// ====== KONFIGURASI (WAJIB DIGANTI!) ======\n#define WIFI_SSID      "{{WIFI_SSID}}"\n#define WIFI_PASSWORD  "{{WIFI_PASSWORD}}"\n\n#define DATABASE_URL   "{{DATABASE_URL}}"\n#define API_KEY        "{{API_KEY}}"\n\n// ====== PIN & OBJEK ======\n#define POT_PIN A0 // Pin potensiometer terhubung ke A0 NodeMCU\n\nFirebaseData fbdo;\nString user = "{{USER_ID}}";\n\nint pot_adc;\nchar pot_data[16]; // Diperbesar dari 4 ke 16 agar tidak buffer overflow\n\n// ============================================\nvoid setup() {\n  Serial.begin(115200);\n  \n  // Inisialisasi OLED (Alamat I2C default 0x3C)\n  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);\n  display.clearDisplay();\n\n  // Koneksi ke WiFi\n  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);\n  Serial.print("Connecting to Wi-Fi");\n  while (WiFi.status() != WL_CONNECTED) {\n    Serial.print(".");\n    delay(300);\n  }\n  Serial.println();\n  Serial.print("Connected with IP: ");\n  Serial.println(WiFi.localIP());\n  Serial.println();\n\n  // Koneksi ke Firebase\n  Serial.printf("Firebase Client v%s\\n\\n", FIREBASE_CLIENT_VERSION);\n  Firebase.begin(DATABASE_URL, API_KEY);\n  Firebase.reconnectWiFi(true);\n}\n\n// ============================================\nvoid loop() {\n  // Membaca data ADC potensiometer (0 - 1023)\n  pot_adc = analogRead(POT_PIN); \n  \n  // Format teks untuk ditampilkan di OLED\n  sprintf(pot_data, "POT:%4d", pot_adc);\n\n  // Kirim data ADC ke Gauge 1 di Firebase\n  Firebase.setInt(fbdo, "/" + user + "/gauge1", pot_adc);\n\n  // --- Tampilan di OLED ---\n  display.setTextSize(1);\n  display.setTextColor(SSD1306_WHITE);\n  display.setCursor(1, 1);\n  display.print("ADC Potensiometer");\n\n  display.setTextSize(2);\n  display.setTextColor(SSD1306_WHITE);\n  display.setCursor(1, 25);\n  display.print(pot_data);\n\n  // WAJIB: Tampilkan buffer ke layar, lalu bersihkan\n  display.display();\n  display.clearDisplay();\n  \n  delay(150); // Jeda kecil agar angka di OLED tidak berkedip terlalu cepat\n}\n`,
+    "modul07DHT": `// ============================================\n// MODUL 07 - MONITORING SUHU & KELEMBABAN (DHT11)\n// ============================================\n\n// Library ESP8266 WiFi dan Firebase\n#include <ESP8266WiFi.h>\n#include <FirebaseESP8266.h>\n\n// Library I2C, LCD, dan DHT11\n#include <Wire.h>\n#include <LiquidCrystal_I2C.h>\n#include <DHT.h>\n\n// ====== KONFIGURASI (WAJIB DIGANTI!) ======\n#define WIFI_SSID      "{{WIFI_SSID}}"\n#define WIFI_PASSWORD  "{{WIFI_PASSWORD}}"\n\n#define DATABASE_URL   "{{DATABASE_URL}}"\n#define API_KEY        "{{API_KEY}}"\n\n// ====== PIN & OBJEK ======\n#define DHT_PIN D5       // Pin DHT11 terhubung ke D5 NodeMCU\n\nFirebaseData fbdo;\nLiquidCrystal_I2C lcd(0x27, 16, 2); // Alamat I2C LCD 0x27, ukuran 16x2\nDHT dht(DHT_PIN, DHT11);            // Objek sensor DHT11\nString user = "{{USER_ID}}";\n\nfloat t, h; // Variabel penyimpan data suhu (t) dan kelembaban (h)\n\n// ============================================\nvoid setup() {\n  Serial.begin(115200);\n  \n  // Inisialisasi Sensor DHT11\n  dht.begin();\n\n  // Inisialisasi LCD\n  lcd.init();\n  lcd.backlight();\n  lcd.setCursor(0, 0); lcd.print("Trainer Kit IoT");\n  lcd.setCursor(0, 1); lcd.print("Connecting-WiFi");\n\n  // Koneksi ke WiFi\n  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);\n  Serial.print("Connecting to Wi-Fi");\n  while (WiFi.status() != WL_CONNECTED) {\n    Serial.print(".");\n    delay(300);\n  }\n  Serial.println();\n  Serial.print("Connected with IP: ");\n  Serial.println(WiFi.localIP());\n  Serial.println();\n\n  // Koneksi ke Firebase\n  Serial.printf("Firebase Client v%s\\n\\n", FIREBASE_CLIENT_VERSION);\n  Firebase.begin(DATABASE_URL, API_KEY);\n  Firebase.reconnectWiFi(true);\n\n  delay(2000);\n  lcd.clear(); // Bersihkan LCD setelah 2 detik\n}\n\n// ============================================\nvoid loop() {\n  // Membaca suhu (Celsius) dan kelembaban (%)\n  t = dht.readTemperature();\n  h = dht.readHumidity();\n\n  // Cek apakah pembacaan sensor gagal (nilainya NaN / Not a Number)\n  if (isnan(t) || isnan(h)) {\n    Serial.println("Tidak dapat membaca sensor DHT11!");\n    return; // Lewati siklus loop ini jika gagal\n  }\n\n  // Print ke Serial Monitor\n  Serial.println("Temp: " + String(t) + " °C");\n  Serial.println("Humd: " + String(h) + "%");\n  Serial.println();\n\n  // Kirim data ke Firebase (Gauge 1 untuk Suhu, Gauge 2 untuk Kelembaban)\n  Firebase.setFloat(fbdo, "/" + user + "/gauge1", t);\n  Firebase.setFloat(fbdo, "/" + user + "/gauge2", h);\n\n  // Tampilkan data di LCD\n  lcd.setCursor(0, 0);\n  // char(223) adalah kode ASCII untuk simbol derajat (°) pada LCD\n  lcd.print("Temp: " + String(t) + char(223) + "C"); \n  \n  lcd.setCursor(0, 1);\n  lcd.print("Humd: " + String(h) + "%");\n  \n  // DHT11 butuh waktu ~1 detik untuk pembacaan berikutnya, \n  // jadi tidak perlu delay tambahan yang terlalu lama.\n}\n`,
+    "modul08": `// ============================================\n// MODUL 08 - MONITORING CUACA & KETINGGIAN\n// Sensor BMP180 + OLED Display via I2C Expander\n// ============================================\n\n// Library ESP8266 WiFi dan Firebase\n#include <ESP8266WiFi.h>\n#include <FirebaseESP8266.h>\n\n// Library OLED Display (I2C)\n#include <Wire.h>\n#include <Adafruit_GFX.h>\n#include <Adafruit_SSD1306.h>\n\n// Library Sensor BMP180\n#include <Adafruit_BMP085.h>\n\n// ====== KONFIGURASI OLED ======\n#define SCREEN_WIDTH 128\n#define SCREEN_HEIGHT 64\n#define OLED_RESET -1\nAdafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);\n\n/// ====== KONFIGURASI (WAJIB DIGANTI!) ======\n#define WIFI_SSID      "{{WIFI_SSID}}"\n#define WIFI_PASSWORD  "{{WIFI_PASSWORD}}"\n\n#define DATABASE_URL   "{{DATABASE_URL}}"\n#define API_KEY        "{{API_KEY}}"\n\n// ====== OBJEK & VARIABEL ======\nFirebaseData fbdo;\nAdafruit_BMP085 bmp;\nString user = "{{USER_ID}}";\n\nint temperature; // Data suhu (°C)\nint pressure;    // Data tekanan udara (hPa)\nint altitude;    // Data ketinggian (m)\n\n// ============================================\nvoid setup() {\n  Serial.begin(115200);\n\n  // Inisialisasi I2C dan Sensor BMP180\n  Wire.begin();\n  if (!bmp.begin()) {\n    Serial.println("Sensor BMP180 tidak terdeteksi!");\n    while (1); // Berhenti jika sensor tidak ditemukan\n  }\n  Serial.println("Sensor BMP180 berhasil diinisialisasi.");\n\n  // Inisialisasi OLED (Alamat I2C default 0x3C)\n  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);\n  display.clearDisplay();\n  display.setTextSize(1);\n  display.setTextColor(SSD1306_WHITE);\n  display.setCursor(10, 25);\n  display.print("Connecting WiFi...");\n  display.display();\n\n  // Koneksi ke WiFi\n  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);\n  Serial.print("Connecting to Wi-Fi");\n  while (WiFi.status() != WL_CONNECTED) {\n    Serial.print(".");\n    delay(300);\n  }\n  Serial.println();\n  Serial.print("Connected with IP: ");\n  Serial.println(WiFi.localIP());\n  Serial.println();\n\n  // Koneksi ke Firebase\n  Serial.printf("Firebase Client v%s\\n\\n", FIREBASE_CLIENT_VERSION);\n  Firebase.begin(DATABASE_URL, API_KEY);\n  Firebase.reconnectWiFi(true);\n}\n\n// ============================================\nvoid loop() {\n  // Membaca data dari sensor BMP180\n  temperature = bmp.readTemperature();          // Suhu dalam °C\n  pressure = bmp.readPressure() / 100;          // Tekanan dalam hPa (dibagi 100 dari Pa)\n  altitude = bmp.readAltitude();                // Ketinggian dalam meter\n\n  // Print ke Serial Monitor\n  Serial.println("=== Data BMP180 ===");\n  Serial.println("Suhu      : " + String(temperature) + " °C");\n  Serial.println("Tekanan   : " + String(pressure) + " hPa");\n  Serial.println("Ketinggian: " + String(altitude) + " m");\n  Serial.println();\n\n  // Kirim data ke Firebase\n  Firebase.setInt(fbdo, "/" + user + "/gauge1", temperature);  // Gauge 1 = Suhu\n  Firebase.setInt(fbdo, "/" + user + "/gauge2", pressure);     // Gauge 2 = Tekanan\n  Firebase.setInt(fbdo, "/" + user + "/hlevel1", altitude);    // HLevel 1 = Ketinggian\n\n  // --- Tampilan di OLED ---\n  display.clearDisplay();\n\n  // Judul\n  display.setTextSize(1);\n  display.setTextColor(SSD1306_WHITE);\n  display.setCursor(35, 0);\n  display.print("BMP180");\n\n  // Suhu\n  display.setCursor(0, 15);\n  display.print("Suhu : ");\n  display.print(temperature);\n  display.print(" C");\n\n  // Tekanan\n  display.setCursor(0, 30);\n  display.print("Pres : ");\n  display.print(pressure);\n  display.print(" hPa");\n\n  // Ketinggian\n  display.setCursor(0, 45);\n  display.print("Alt  : ");\n  display.print(altitude);\n  display.print(" m");\n\n  // WAJIB: Tampilkan buffer ke layar\n  display.display();\n\n  delay(2000); // Jeda 2 detik sebelum pembacaan berikutnya\n}\n`,
+    "modul09": `// ============================================\n// MODUL 09 - SMART AGRICULTURE (TANAH & HUJAN)\n// ============================================\n\n// Library ESP8266 WiFi dan Firebase\n#include <ESP8266WiFi.h>\n#include <FirebaseESP8266.h>\n\n// Library I2C dan LCD\n#include <Wire.h>\n#include <LiquidCrystal_I2C.h>\n\n/// ====== KONFIGURASI (WAJIB DIGANTI!) ======\n#define WIFI_SSID      "{{WIFI_SSID}}"\n#define WIFI_PASSWORD  "{{WIFI_PASSWORD}}"\n\n#define DATABASE_URL   "{{DATABASE_URL}}"\n#define API_KEY        "{{API_KEY}}"\n\n// ====== PIN & OBJEK ======\n#define AS_PIN A0 // Pin Analog Sensor (Tanah/Hujan) ke A0 NodeMCU\n\nFirebaseData fbdo;\nLiquidCrystal_I2C lcd(0x27, 16, 2);\nString user = "{{USER_ID}}";\n\nint as_adc, as_value;\nchar as_data[16];\n\n// ============================================\nvoid setup() {\n  Serial.begin(115200);\n\n  // Inisialisasi LCD\n  lcd.init();\n  lcd.backlight();\n  lcd.setCursor(0, 0); lcd.print("Trainer Kit IoT");\n  lcd.setCursor(0, 1); lcd.print("Connecting-WiFi");\n\n  // Koneksi ke WiFi\n  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);\n  Serial.print("Connecting to Wi-Fi");\n  while (WiFi.status() != WL_CONNECTED) {\n    Serial.print(".");\n    delay(300);\n  }\n  Serial.println();\n  Serial.print("Connected with IP: ");\n  Serial.println(WiFi.localIP());\n  Serial.println();\n\n  // Koneksi ke Firebase\n  Serial.printf("Firebase Client v%s\\n\\n", FIREBASE_CLIENT_VERSION);\n  Firebase.begin(DATABASE_URL, API_KEY);\n  Firebase.reconnectWiFi(true);\n\n  delay(2000);\n  lcd.clear();\n}\n\n// ============================================\nvoid loop() {\n  // Membaca data ADC sensor (0 - 1023)\n  as_adc = analogRead(AS_PIN);\n  \n  // Konversi nilai ADC ke persentase (0 - 100%)\n  // CATATAN: 760 adalah nilai ADC maksimal saat sensor basah/kotor.\n  // Jika pakai sensor hujan, angka 760 ini mungkin perlu disesuaikan (lihat panduan kalibrasi).\n  as_value = map(as_adc, 0, 760, 0, 100); \n  \n  // Batasi nilai agar tidak lebih dari 100%\n  if (as_value > 100) as_value = 100;\n\n  // Print ke Serial Monitor (Berguna untuk kalibrasi)\n  Serial.print("ADC  : "); Serial.println(as_adc);\n  Serial.print("Nilai: "); Serial.print(as_value); Serial.println("%");\n  Serial.println();\n\n  // Kirim data ke Gauge 1 di Firebase\n  Firebase.setInt(fbdo, "/" + user + "/gauge1", as_value);\n\n  // Tampilkan data di LCD\n  lcd.setCursor(0, 0); lcd.print("Analog Sens(%)");\n  sprintf(as_data, "AS:%3d", as_value);\n  lcd.setCursor(0, 1); lcd.print(as_data);\n\n  delay(150); // Jeda agar perubahan nilai lebih halus\n}\n`,
+    "modul10BAG02": `// ============================================\n// MODUL 10 BAGIAN 2 - SENSOR ULTRASONIK (JARAK)\n// Range Meter dengan OLED Display & Firebase\n// ============================================\n#include <ESP8266WiFi.h>\n#include <FirebaseESP8266.h>\n#include <Wire.h>\n#include <Adafruit_GFX.h>\n#include <Adafruit_SSD1306.h>\n#include <NewPing.h> // Library Sensor Ultrasonic sesuai PDF\n\n// ====== KONFIGURASI OLED ======\n#define SCREEN_WIDTH 128\n#define SCREEN_HEIGHT 64\n#define OLED_RESET -1\nAdafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);\n\n// ====== KONFIGURASI (WAJIB DIGANTI!) ======\n#define WIFI_SSID      "{{WIFI_SSID}}"\n#define WIFI_PASSWORD  "{{WIFI_PASSWORD}}"\n\n#define DATABASE_URL   "{{DATABASE_URL}}"\n#define API_KEY        "{{API_KEY}}"\n\n// ====== PIN & OBJEK ======\n#define T    D5   // PIN T(Trig) terhubung ke PIN D5 NodeMCU\n#define E    D6   // PIN E(Echo) terhubung ke PIN D6 NodeMCU\n#define Maks 200  // Jarak maksimal yang diukur (cm)\nNewPing us(T, E, Maks);\n\nFirebaseData fbdo;\nString user = "{{USER_ID}}";\nint jarak;\nchar val_jarak[3];\n\n// ============================================\nvoid setup(){\n  Serial.begin(115200);\n\n  // Inisialisasi OLED\n  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);\n  display.clearDisplay();\n\n  // Koneksi WiFi\n  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);\n  Serial.print("Connecting to Wi-Fi");\n  while(WiFi.status() != WL_CONNECTED) { \n    Serial.print("."); \n    delay(300); \n  }\n  Serial.println("Connected!");\n\n  // Koneksi Firebase\n  Firebase.begin(DATABASE_URL, API_KEY);\n  Firebase.reconnectWiFi(true);\n}\n\n// ============================================\nvoid loop(){\n  // 1. Membaca data sensor menggunakan library NewPing\n  jarak = us.ping_cm(); \n  sprintf(val_jarak, "%3d", jarak);\n\n  // 2. Print ke Serial Monitor\n  Serial.println("Jarak: " + String(jarak) + " cm");\n\n  // 3. Kirim data ke Horizontal Level 1 di Firebase\n  Firebase.setInt(fbdo, "/" + user + "/hlevel1", jarak);\n\n  // 4. Tampilkan data pada OLED Display\n  display.clearDisplay();\n  \n  display.setTextSize(2);\n  display.setTextColor(SSD1306_WHITE);\n  display.setCursor(1,1);\n  display.print("Jarak(cm)");\n\n  display.setTextSize(3);\n  display.setTextColor(SSD1306_WHITE);\n  display.setCursor(1,25);\n  display.print(val_jarak);\n\n  // WAJIB: Tampilkan buffer ke layar\n  display.display(); \n  \n  delay(150); // Jeda agar perubahan nilai lebih halus\n}`,
+    "modul10PIR": `\n// ============================================\n// MODUL 10 BAGIAN 1 - SENSOR PIR (GERAKAN)\n// ============================================\n#include <ESP8266WiFi.h>\n#include <FirebaseESP8266.h>\n#include <LiquidCrystal_I2C.h>\n#include <Wire.h>\n\n// ====== KONFIGURASI (WAJIB DIGANTI!) ======\n#define WIFI_SSID      "{{WIFI_SSID}}"\n#define WIFI_PASSWORD  "{{WIFI_PASSWORD}}"\n\n#define DATABASE_URL   "{{DATABASE_URL}}"\n#define API_KEY        "{{API_KEY}}"\n\n// ====== PIN & OBJEK ======\n#define PIR_PIN D0  // Pin sensor PIR terhubung ke D0 NodeMCU\n\nFirebaseData fbdo;\nLiquidCrystal_I2C lcd(0x27, 16, 2);\nString user = "{{USER_ID}}";\n\n// ============================================\nvoid setup() {\n  Serial.begin(115200);\n  pinMode(PIR_PIN, INPUT);\n\n  Serial.println("=== MODUL 10 BAG 1: Sensor PIR ===");\n  \n  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);\n  Serial.print("Connecting to Wi-Fi");\n  while (WiFi.status() != WL_CONNECTED) {\n    Serial.print("."); delay(300);\n  }\n  Serial.println("Connected!");\n\n  Firebase.begin(DATABASE_URL, API_KEY);\n  Firebase.reconnectWiFi(true);\n  \n  // Kalibrasi awal PIR (biarkan sensor stabil selama 1-2 detik)\n  delay(2000); \n}\n\n// ============================================\nvoid loop() {\n  // Tampilkan teks pada LCD\n  lcd.setCursor(0, 0); \n  lcd.print("Deteksi Gerakan:");\n\n  // Jika PIR mendeteksi gerakan, output bernilai HIGH\n  if (digitalRead(PIR_PIN) == HIGH) {\n    lcd.setCursor(0, 1); \n    lcd.print("Gerak Terdeteksi");\n    Serial.println("Gerakan Terdeteksi!");\n    \n    // Kirim string ke Indikator 1 di Firebase\n    Firebase.setString(fbdo, "/" + user + "/indicator1", "Gerakan Terdeteksi");\n  } else {\n    lcd.setCursor(0, 1); \n    lcd.print("Tidak Terdeteksi");\n    Serial.println("Tidak Terdeteksi");\n    \n    // Kirim string ke Indikator 1 di Firebase\n    Firebase.setString(fbdo, "/" + user + "/indicator1", "Tidak Terdeteksi");\n  }\n  \n  delay(500);  // Jeda agar tidak terlalu cepat\n}`,
+    "modul11": `// ============================================\n// MODUL 11 - KENDALI AKTUATOR PRESISI (MOTOR SERVO)\n// ============================================\n\n// Library ESP8266 WiFi, Firebase, dan Servo\n#include <ESP8266WiFi.h>\n#include <FirebaseESP8266.h>\n#include <Servo.h>\n\n// ====== PIN & OBJEK ======\n#define SERVO_PIN D0 // Pin sinyal servo terhubung ke D0\n\n/// ====== KONFIGURASI (WAJIB DIGANTI!) ======\n#define WIFI_SSID      "{{WIFI_SSID}}"\n#define WIFI_PASSWORD  "{{WIFI_PASSWORD}}"\n\n#define DATABASE_URL   "{{DATABASE_URL}}"\n#define API_KEY        "{{API_KEY}}"\n\n// ====== OBJEK & VARIABEL ======\nFirebaseData fbdo;\nServo servo;\nString user = "{{USER_ID}}";\n\n// ============================================\nvoid setup() {\n  Serial.begin(115200);\n  \n  // Konfigurasi pin pada objek servo\n  servo.attach(SERVO_PIN);\n\n  // Koneksi ke WiFi\n  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);\n  Serial.print("Connecting to Wi-Fi");\n  while (WiFi.status() != WL_CONNECTED) {\n    Serial.print(".");\n    delay(300);\n  }\n  Serial.println();\n  Serial.print("Connected with IP: ");\n  Serial.println(WiFi.localIP());\n  Serial.println();\n\n  // Koneksi ke Firebase\n  Serial.printf("Firebase Client v%s\\n\\n", FIREBASE_CLIENT_VERSION);\n  Firebase.begin(DATABASE_URL, API_KEY);\n  Firebase.reconnectWiFi(true);\n}\n\n// ============================================\nvoid loop() {\n  // Membaca status switch1 dari Firebase\n  if (Firebase.getString(fbdo, "/" + user + "/switch1")) {\n    if (fbdo.to<bool>() == true) {\n      servo.write(180); // Putar servo ke 180 derajat\n      Serial.println("Servo 180 derajat");\n    } else {\n      servo.write(0);   // Putar servo ke 0 derajat\n      Serial.println("Servo 0 derajat");\n    }\n  }\n  \n  delay(100); // Jeda kecil agar tidak spam pembacaan\n}\n\n`,
+    "modul12": `// ============================================\n// MODUL 12 - IDENTIFIKASI BERBASIS RFID (WM)\n// ============================================\n\n// Library WiFi & Firebase\n#include <ESP8266WiFi.h>\n#include <FirebaseESP8266.h>\n\n// Library LCD I2C\n#include <Wire.h>\n#include <LiquidCrystal_I2C.h>\n\n// Library RFID (SPI)\n#include <SPI.h>\n#include <MFRC522.h>\n\n// ====== KONFIGURASI PIN RFID ======\n#define RST_PIN D0  // Pin RST RFID ke D0\n#define SS_PIN  D8  // Pin SDA(SS) RFID ke D8\n\n// ====== KONFIGURASI PIN BUZZER ======\n#define BUZZ_PIN D3 // Pin Buzzer ke D3\n\n/// ====== KONFIGURASI (WAJIB DIGANTI!) ======\n#define WIFI_SSID      "{{WIFI_SSID}}"\n#define WIFI_PASSWORD  "{{WIFI_PASSWORD}}"\n\n#define DATABASE_URL   "{{DATABASE_URL}}"\n#define API_KEY        "{{API_KEY}}"\n\n// ====== OBJEK & VARIABEL ======\nFirebaseData fbdo;\nLiquidCrystal_I2C lcd(0x27, 16, 2);\nMFRC522 mfrc522(SS_PIN, RST_PIN); // Buat objek MFRC522\n\nString user = "{{USER_ID}}";\nString nuid;\n// Ganti "12e44a1b" dengan NUID kartu RFID kamu yang asli nanti!\nString rfid_tag = "12e44a1b"; \n\n// ============================================\nvoid setup() {\n  Serial.begin(115200);\n  \n  pinMode(BUZZ_PIN, OUTPUT);\n  digitalWrite(BUZZ_PIN, LOW);\n\n  SPI.begin();           // Inisialisasi komunikasi SPI\n  mfrc522.PCD_Init();    // Inisialisasi RFID RC522\n\n  // Inisialisasi LCD\n  lcd.init();\n  lcd.backlight();\n  lcd.setCursor(0, 0); lcd.print("Trainer Kit IoT");\n  lcd.setCursor(0, 1); lcd.print("Connecting-WiFi");\n\n  // Koneksi WiFi\n  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);\n  Serial.print("Connecting to Wi-Fi");\n  while (WiFi.status() != WL_CONNECTED) {\n    Serial.print(".");\n    delay(300);\n  }\n  Serial.println("Connected with IP: " + WiFi.localIP().toString());\n\n  // Koneksi Firebase\n  Firebase.begin(DATABASE_URL, API_KEY);\n  Firebase.reconnectWiFi(true);\n\n  delay(2000);\n  lcd.clear();\n}\n\n// ============================================\nvoid loop() {\n  lcd.setCursor(0, 0); lcd.print("RFID READER");\n  lcd.setCursor(0, 1); lcd.print("NUID:           "); // Spasi untuk clear teks lama\n\n  // Cek apakah ada kartu baru yang mendekat\n  if (!mfrc522.PICC_IsNewCardPresent()) return;\n  if (!mfrc522.PICC_ReadCardSerial())  return;\n\n  // Gabungkan byte UID menjadi satu string NUID\n  String tag_id = "";\n  for (byte i = 0; i < mfrc522.uid.size; i++) {\n    if (mfrc522.uid.uidByte[i] < 0x10) tag_id += "0"; // Tambah '0' depan jika hex < 10\n    tag_id += String(mfrc522.uid.uidByte[i], HEX);\n  }\n  nuid = tag_id;\n  nuid.toUpperCase(); // Opsional: jadikan huruf kapital semua biar rapi\n\n  Serial.print("UID Tag: ");\n  Serial.println(nuid);\n\n  // Verifikasi NUID dengan Kartu Master\n  if (rfid_tag == nuid) {\n    buzz_auth();\n    buzz_accepted();\n    lcd.setCursor(5, 1); lcd.print("AKSES OK!");\n  } else {\n    buzz_auth();\n    buzz_denied();\n    lcd.setCursor(5, 1); lcd.print("AKSES DITOLAK");\n  }\n\n  // Kirim NUID ke Indikator 1 di Firebase\n  Firebase.setString(fbdo, "/" + user + "/indicator1", nuid);\n\n  delay(2000); // Tahan tampilan LCD selama 2 detik\n}\n\n// ============================================\n// FUNGSI BUNYI BUZZER\n// ============================================\nvoid buzz_auth() {\n  for (int x = 0; x < 8; x++) {\n    digitalWrite(BUZZ_PIN, HIGH); delay(50);\n    digitalWrite(BUZZ_PIN, LOW);  delay(30);\n  }\n  delay(500);\n}\n\nvoid buzz_accepted() {\n  for (int x = 0; x < 2; x++) {\n    digitalWrite(BUZZ_PIN, HIGH); delay(200);\n    digitalWrite(BUZZ_PIN, LOW);  delay(100);\n  }\n}\n\nvoid buzz_denied() {\n  digitalWrite(BUZZ_PIN, HIGH); delay(1000);\n  digitalWrite(BUZZ_PIN, LOW);  delay(100);\n}\n`,
+    "modul13DEL": `// ============================================\n// MODUL 13 - FINGERPRINT (DELETE / HAPUS)\n// ============================================\n#include <Adafruit_Fingerprint.h>\n#include <Wire.h>\n#include <LiquidCrystal_I2C.h>\n#include <SoftwareSerial.h>\n\n#define BUZZ_PIN D3\nLiquidCrystal_I2C lcd(0x27, 16, 2);\nSoftwareSerial FP_Serial(D5, D6);\nAdafruit_Fingerprint finger = Adafruit_Fingerprint(&FP_Serial);\n\nint id;\n\nvoid setup(){\n  Serial.begin(115200);\n  pinMode(BUZZ_PIN, OUTPUT); digitalWrite(BUZZ_PIN, LOW);\n  finger.begin(57600);\n  \n  lcd.init(); lcd.backlight();\n  lcd.print("Trainer Kit IoT"); delay(2000); lcd.clear();\n  \n  if(finger.verifyPassword()){\n    lcd.setCursor(0, 0); lcd.print("Sensor ditemukan");\n    Serial.println("Sensor ditemukan"); delay(1000); lcd.clear();\n  } else{\n    lcd.setCursor(0, 0); lcd.print("Tidak Ada Sensor");\n    Serial.println("Tidak Ada Sensor"); delay(1000); lcd.clear();\n  }\n}\n\nint baca_id(){\n  uint8_t num = 0;\n  while(num == 0){ while(!Serial.available()); num = Serial.parseInt(); }\n  buzz_done(); return num;\n}\n\nvoid loop(){\n  Serial.println("Ketik ID (1-127) yang akan dihapus!");\n  lcd.setCursor(0, 0); lcd.print("Ketik ID (1-127)");\n  lcd.setCursor(0, 1); lcd.print("Serial Monitor  ");\n  \n  id = baca_id();\n  if(id == 0) return;\n  \n  Serial.print("Menghapus ID#"); Serial.println(id);\n  deleteFingerprint(id);\n}\n\nuint8_t deleteFingerprint(int id){\n  int p = -1;\n  p = finger.deleteModel(id);\n  if(p == FINGERPRINT_OK){\n    Serial.println("Sidik jari dihapus!"); buzz_deleted();\n    lcd.setCursor(0, 0); lcd.print("Berhasil dihapus"); delay(2000);\n  } else{\n    Serial.println("Sidik jari gagal dihapus"); buzz_failed();\n    lcd.setCursor(0, 0); lcd.print("Gagal dihapus   "); delay(2000);\n  }\n  return p;\n}\n\nvoid buzz_done(){ digitalWrite(BUZZ_PIN, HIGH); delay(200); digitalWrite(BUZZ_PIN, LOW); delay(100); }\nvoid buzz_deleted(){ for(int x=0; x<2; x++){ digitalWrite(BUZZ_PIN, HIGH); delay(200); digitalWrite(BUZZ_PIN, LOW); delay(100); } }\nvoid buzz_failed(){ digitalWrite(BUZZ_PIN, HIGH); delay(1000); digitalWrite(BUZZ_PIN, LOW); delay(100); }\n`,
+    "modul13READ": `// ============================================\n// MODUL 13 - FINGERPRINT (READ / VERIFIKASI)\n// ============================================\n#include <Adafruit_Fingerprint.h>\n#include <Wire.h>\n#include <LiquidCrystal_I2C.h>\n#include <SoftwareSerial.h>\n\n#define BUZZ_PIN D3\nLiquidCrystal_I2C lcd(0x27, 16, 2);\nSoftwareSerial FP_Serial(D5, D6);\nAdafruit_Fingerprint finger = Adafruit_Fingerprint(&FP_Serial);\n\nint id = 0;\nString id_name = "Sola"; // Ganti dengan nama kamu\n\nvoid setup(){\n  Serial.begin(115200);\n  pinMode(BUZZ_PIN, OUTPUT); digitalWrite(BUZZ_PIN, LOW);\n  finger.begin(57600);\n  \n  lcd.init(); lcd.backlight();\n  lcd.print("Trainer Kit IoT"); delay(2000); lcd.clear();\n  \n  if(finger.verifyPassword()){\n    lcd.setCursor(0, 0); lcd.print("Sensor ditemukan");\n    Serial.println("Sensor ditemukan"); delay(1000); lcd.clear();\n  } else{\n    lcd.setCursor(0, 0); lcd.print("Tidak Ada Sensor");\n    Serial.println("Tidak Ada Sensor"); delay(1000); lcd.clear();\n  }\n}\n\nvoid loop(){\n  lcd.setCursor(0, 0); lcd.print(" SELAMAT DATANG");\n  lcd.setCursor(0, 1); lcd.print(" SCAN JARI ANDA");\n  \n  id = getFingerprintIDez(); delay(50);\n  \n  if(id == 1){ // Jika ID 1 yang terdaftar terdeteksi\n    lcd.clear(); buzz_match();\n    lcd.setCursor(0, 0); lcd.print("ID TERDAFTAR    ");\n    lcd.setCursor(0, 1); lcd.print("Hai, " + id_name);\n    delay(2000); id = 0; lcd.clear();\n  } else{\n    buzz_not_match();\n    lcd.setCursor(0, 0); lcd.print("TIDAK TERDAFTAR!");\n    lcd.setCursor(0, 1); lcd.print("Silahkan Reg. fp");\n    delay(2000); id = 0; lcd.clear();\n  }\n}\n\nint getFingerprintIDez(){\n  int p = -1;\n  while(p != FINGERPRINT_OK){\n    p = finger.getImage();\n    if(p == FINGERPRINT_OK){ Serial.println("Memindai sidik jari"); buzz_scan(); break; }\n  }\n  p = finger.image2Tz(); if(p != FINGERPRINT_OK){ Serial.println("Konversi bermasalah"); return p; }\n  Serial.println("Konversi sidik jari");\n  \n  p = finger.fingerFastSearch();\n  if(p != FINGERPRINT_OK){ Serial.println("Sidik jari tidak ditemukan"); return p; }\n  Serial.println("Sidik jari ditemukan");\n  \n  Serial.print("ID Ditemukan#"); Serial.print(finger.fingerID);\n  Serial.print(" dengan konfidensi"); Serial.println(finger.confidence);\n  return finger.fingerID;\n}\n\nvoid buzz_scan(){ for(int x=0; x<8; x++){ digitalWrite(BUZZ_PIN, HIGH); delay(50); digitalWrite(BUZZ_PIN, LOW); delay(30); } }\nvoid buzz_match(){ for(int x=0; x<2; x++){ digitalWrite(BUZZ_PIN, HIGH); delay(200); digitalWrite(BUZZ_PIN, LOW); delay(100); } }\nvoid buzz_not_match(){ digitalWrite(BUZZ_PIN, HIGH); delay(1000); digitalWrite(BUZZ_PIN, LOW); delay(100); }\n`,
+    "modul13REG": `// ============================================\n// MODUL 13 - FINGERPRINT (ENROLL / DAFTAR)\n// ============================================\n#include <Adafruit_Fingerprint.h>\n#include <Wire.h>\n#include <LiquidCrystal_I2C.h>\n#include <SoftwareSerial.h>\n\n#define BUZZ_PIN D3\nLiquidCrystal_I2C lcd(0x27, 16, 2);\n\n// Koneksi PIN Fingerprint: TX ke D5, RX ke D6\nSoftwareSerial FP_Serial(D5, D6);\nAdafruit_Fingerprint finger = Adafruit_Fingerprint(&FP_Serial);\n\nint id;\n\nvoid setup(){\n  Serial.begin(115200);\n  pinMode(BUZZ_PIN, OUTPUT);\n  digitalWrite(BUZZ_PIN, LOW);\n  \n  finger.begin(57600);\n  \n  lcd.init(); lcd.backlight();\n  lcd.print("Trainer Kit IoT"); delay(2000); lcd.clear();\n  \n  if(finger.verifyPassword()){\n    lcd.setCursor(0, 0); lcd.print("Sensor ditemukan");\n    Serial.println("Sensor ditemukan"); delay(1000); lcd.clear();\n  } else{\n    lcd.setCursor(0, 0); lcd.print("Tidak Ada Sensor");\n    Serial.println("Tidak Ada Sensor"); delay(1000); lcd.clear();\n  }\n}\n\nint baca_id(){\n  uint8_t num = 0;\n  while(num == 0){ while(!Serial.available()); num = Serial.parseInt(); }\n  buzz_notif(); return num;\n}\n\nvoid loop(){\n  Serial.println("Ketik ID (1-127) yang akan didaftarkan!");\n  lcd.setCursor(0, 0); lcd.print("Ketik ID (1-127)");\n  lcd.setCursor(0, 1); lcd.print("Serial Monitor  ");\n  \n  id = baca_id();\n  if(id == 0) return;\n  \n  Serial.print("Mendaftar ID#"); Serial.println(id);\n  while(!getFingerprintEnroll());\n}\n\nuint8_t getFingerprintEnroll(){\n  int p = -1;\n  lcd.setCursor(0, 0); lcd.print("Tempel jari anda");\n  lcd.setCursor(0, 1); lcd.print("................");\n  \n  while(p != FINGERPRINT_OK){\n    p = finger.getImage();\n    if(p == FINGERPRINT_OK){\n      buzz_scan(); lcd.setCursor(0, 0); lcd.print("Scanning sensor ");\n      delay(2000); Serial.println("Memindai sidik jari (1)"); break;\n    }\n  }\n  p = finger.image2Tz(1); if(p != FINGERPRINT_OK) return p;\n  Serial.println("Konversi sidik jari (1)");\n  \n  Serial.println("Lepas jari"); buzz_notif();\n  lcd.setCursor(0, 0); lcd.print("Lepas jari      ");\n  p = 0; while(p != FINGERPRINT_NOFINGER){ p = finger.getImage(); }\n  \n  p = -1; Serial.println("Letakkan lagi jari yang sama");\n  lcd.setCursor(0, 0); lcd.print("Letakkan kembali");\n  while(p != FINGERPRINT_OK){\n    p = finger.getImage();\n    if(p == FINGERPRINT_OK){\n      buzz_scan(); Serial.println("Memindai sidik jari (2)"); break;\n    }\n  }\n  p = finger.image2Tz(2); if(p != FINGERPRINT_OK) return p;\n  Serial.println("Konversi sidik jari (2)");\n  \n  p = finger.createModel();\n  if(p == FINGERPRINT_OK){\n    Serial.println("Sidik jari cocok"); buzz_match();\n    lcd.setCursor(0, 0); lcd.print("Sidik jari cocok"); delay(2000);\n  } else if(p == FINGERPRINT_ENROLLMISMATCH){\n    Serial.println("Sidik jari tidak cocok"); buzz_not_match();\n    lcd.setCursor(0, 0); lcd.print("Tidak cocok     "); lcd.setCursor(0, 1); lcd.print("Ulangi proses   "); delay(2000); return p;\n  }\n  \n  p = finger.storeModel(id);\n  if(p == FINGERPRINT_OK){\n    Serial.println("Sidik jari disimpan!"); buzz_store_id();\n    lcd.setCursor(0, 0); lcd.print("Menyimpan data..");\n    lcd.setCursor(0, 1); lcd.print("ID " + String(id) + " Tersimpan "); delay(3000);\n  } else{\n    Serial.println("Sidik jari gagal disimpan!"); buzz_not_match();\n    lcd.setCursor(0, 0); lcd.print("Gagal Menyimpan "); lcd.setCursor(0, 1); lcd.print("Ulangi proses   "); delay(3000); return p;\n  }\n  return true;\n}\n\nvoid buzz_scan(){ for(int x=0; x<8; x++){ digitalWrite(BUZZ_PIN, HIGH); delay(50); digitalWrite(BUZZ_PIN, LOW); delay(30); } }\nvoid buzz_notif(){ digitalWrite(BUZZ_PIN, HIGH); delay(200); digitalWrite(BUZZ_PIN, LOW); delay(100); }\nvoid buzz_match(){ for(int x=0; x<2; x++){ digitalWrite(BUZZ_PIN, HIGH); delay(200); digitalWrite(BUZZ_PIN, LOW); delay(100); } }\nvoid buzz_not_match(){ digitalWrite(BUZZ_PIN, HIGH); delay(1000); digitalWrite(BUZZ_PIN, LOW); delay(100); }\nvoid buzz_store_id(){ for(int x=0; x<2; x++){ digitalWrite(BUZZ_PIN, HIGH); delay(200); digitalWrite(BUZZ_PIN, LOW); delay(100); } digitalWrite(BUZZ_PIN, HIGH); delay(500); digitalWrite(BUZZ_PIN, LOW); delay(100); }\n`,
+    "modul14": `// ============================================\n// MODUL 14 - SENSOR GESTURE & INTEGRASI (WM)\n// Kendali 3 LED dengan Sapuan Tangan (APDS9960)\n// ============================================\n\n// Library LCD 16x2 I2C\n#include <Wire.h>\n#include <LiquidCrystal_I2C.h>\n\n// Library APDS9960\n#include <SparkFun_APDS9960.h>\n\n// ====== KONFIGURASI PIN ======\n#define APDS9960_SDA D2\n#define APDS9960_SCL D1\n#define APDS9960_INT D5\n\nLiquidCrystal_I2C lcd(0x27, 16, 2);\n\n// ====== OBJEK & VARIABEL GLOBAL ======\nSparkFun_APDS9960 apds = SparkFun_APDS9960();\nvolatile bool isr_flag = 0;\n\n// Fungsi interupsi (Wajib disimpan di IRAM untuk ESP8266)\nvoid ICACHE_RAM_ATTR interruptRoutine();\n\n// Variabel data lampu dan pin lampu\nint pos = 0; \nint lamp_pin[3] = {D0, D6, D7}; // Pin LED 1, 2, 3\nboolean lamp_state[3];            // Status ON/OFF tiap LED\nString state;\n\n// ============================================\nvoid setup() {\n  Serial.begin(115200);\n\n  // Memulai komunikasi I2C\n  Wire.begin(APDS9960_SDA, APDS9960_SCL);\n  \n  // Mengatur pin interrupt sebagai input dan mendaftarkan fungsi interupsi\n  pinMode(digitalPinToInterrupt(APDS9960_INT), INPUT);\n  attachInterrupt(digitalPinToInterrupt(APDS9960_INT), interruptRoutine, FALLING);\n\n  // Inisialisasi APDS-9960\n  apds.init();\n  apds.enableGestureSensor(true); // Mengaktifkan mode gesture\n\n  // Mengatur pin lampu sebagai output dengan kondisi awal LOW (MATI)\n  for (int i = 0; i <= 2; i++) {\n    pinMode(lamp_pin[i], OUTPUT);\n    digitalWrite(lamp_pin[i], LOW);\n    lamp_state[i] = false;\n  }\n\n  // Inisialisasi LCD\n  lcd.init();\n  lcd.backlight();\n  lcd.print("Trainer Kit IoT");\n  delay(2000);\n  lcd.clear();\n}\n\n// ============================================\nvoid loop() {\n  // Membaca status ISR (Interrupt Service Routine)\n  if (isr_flag == 1) {\n    detachInterrupt(digitalPinToInterrupt(APDS9960_INT)); // Nonaktifkan interupsi sementara\n    handleGesture();                                      // Proses gesture\n    isr_flag = 0;                                         // Reset flag\n    attachInterrupt(digitalPinToInterrupt(APDS9960_INT), interruptRoutine, FALLING); // Aktifkan lagi\n  }\n\n  // Membuat indeks 'pos' berputar (wrap-around) antara 0, 1, dan 2\n  if (pos > 2) pos = 0;\n  if (pos < 0) pos = 2;\n\n  // Menyalakan/mematikan LED sesuai status tersimpan pada posisi yang dipilih\n  digitalWrite(lamp_pin[pos], lamp_state[pos]);\n\n  // Menampilkan status di LCD\n  lcd.setCursor(0, 0); \n  lcd.print("Lampu Gesture ");\n  \n  lcd.setCursor(0, 1); \n  lcd.print("> Lampu");\n  lcd.setCursor(8, 1); \n  lcd.print(pos + 1);      // Tampilkan nomor LED (1, 2, atau 3)\n  lcd.setCursor(9, 1); \n  lcd.print(":");\n  \n  // Mengubah status boolean menjadi teks ON/OFF\n  if (lamp_state[pos] == true)  state = "ON";\n  if (lamp_state[pos] == false) state = "OFF";\n  \n  lcd.setCursor(11, 1); \n  lcd.print(state);\n}\n\n// ============================================\n// FUNGSI INTERUPSI & GESTURE\n// ============================================\n\n// Fungsi Interrupt Routine (Hanya menandai flag)\nvoid interruptRoutine() {\n  isr_flag = 1;\n}\n\n// Fungsi handleGesture: membaca arah gesture\nvoid handleGesture() {\n  if (apds.isGestureAvailable()) {\n    switch (apds.readGesture()) {\n      case DIR_UP:\n        lamp_state[pos] = true;  // Nyalakan LED yang dipilih\n        Serial.println("ATAS");\n        break;\n      case DIR_DOWN:\n        lamp_state[pos] = false; // Matikan LED yang dipilih\n        Serial.println("BAWAH");\n        break;\n      case DIR_LEFT:\n        pos--;                   // Pindah pilihan ke LED sebelumnya\n        Serial.println("KIRI");\n        break;\n      case DIR_RIGHT:\n        pos++;                   // Pindah pilihan ke LED berikutnya\n        Serial.println("KANAN");\n        break;\n      default:\n        Serial.println("TIDAK ADA");\n        break;\n    }\n  }\n}\n`
+};
+
+// Export untuk digunakan di dashboard.js
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = ARDUINO_TEMPLATES;
+}
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - IoT Monitoring</title>
+    <link rel="stylesheet" href="style.css">
+	<!-- Library untuk membuat file ZIP di browser -->
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+	<!-- Library untuk memicu download file -->
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- HEADER -->
+        <header>
+            <div class="header-info">
+                <h1>IoT Dashboard</h1>
+                <p class="subtitle">Sistem Monitoring Real-time</p>
+                <p class="user-info" id="user-display"></p>
+            </div>
+			<!-- Ganti bagian header-actions di dashboard.html -->
+            <div class="header-actions">
+                <a href="settings.html" class="settings-btn">Pengaturan</a>
+                <button id="logoutBtn" class="logout-btn">Keluar</button>
+            </div>
+        </header>
+
+		<div class="download-section" style="background: rgba(255,255,255,0.05); padding: 20px; border-radius: 12px; margin-bottom: 24px; border: 1px solid rgba(255,215,0,0.2);">
+		  <h3 style="color: var(--primary-gold); margin-bottom: 10px; font-size: 1.2rem;"> 📥 Unduh Kode Arduino</h3>
+		  <p style="color: var(--text-secondary); margin-bottom: 15px; font-size: 0.9rem;">Pilih modul spesifik atau unduh semua modul sekaligus dalam format .zip yang sudah disesuaikan dengan akun Anda.</p>
+		  
+		  <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+			<!-- Dropdown untuk unduh satuan -->
+			<select id="moduleSelect" style="padding: 10px; border-radius: 8px; border: 1px solid var(--accent-navy); background: var(--bg-dark); color: var(--text-primary); flex: 1; min-width: 200px;">
+			  <option value="">-- Pilih Modul Satuan --</option>
+			  <!-- Opsi akan diisi otomatis oleh JavaScript -->
+			</select>
+			
+			<button onclick="downloadArduinoCode()" style="padding: 10px 20px; background: linear-gradient(135deg, #FFD700, #FFA500); color: #1e3c72; border: none; border-radius: 8px; font-weight: bold; cursor: pointer;">
+			  ⬇️ Unduh Satuan
+			</button>
+
+			<!-- TOMBOL BARU: UNDUH SEMUA -->
+			<button onclick="downloadAllModules()" style="padding: 10px 20px; background: linear-gradient(135deg, #28a745, #218838); color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; display: flex; align-items: center; gap: 5px;">
+			  📦 Unduh Semua (.zip)
+			</button>
+		  </div>
+		  <p id="download-status" style="margin-top: 10px; font-size: 0.85rem; color: var(--primary-gold); display: none;"></p>
+		</div>
+
+
+        <!-- MAIN DASHBOARD -->
+        <main class="dashboard" id="dynamic-dashboard">
+            <p class="loading-text">Memuat data dari server...</p>
+        </main>
+    </div>
+	<!-- Letakkan di atas script dashboard.js -->
+	<script src="templates.js"></script>
+    <script src="dashboard.js"></script>
+</body>
+</html><!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Redirect otomatis ke login.html dalam 0 detik -->
+    <meta http-equiv="refresh" content="0; url=login.html">
+    <title>IoT Dashboard - Redirecting...</title>
+    <style>
+        body {
+            margin: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: white;
+            font-family: 'Segoe UI', sans-serif;
+            text-align: center;
+        }
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid #FFD700;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        a { color: #FFD700; text-decoration: none; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="spinner"></div>
+    <h2>Mengalihkan ke halaman Login...</h2>
+    <p>Jika tidak dialihkan otomatis, <a href="login.html">klik di sini</a>.</p>
+</body>
+</html><!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - IoT Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-card">
+            <h1>IoT Dashboard</h1>
+            <p class="subtitle">  </p>
+            
+            <form id="login-form">
+                <div class="form-group">
+                    <label for="db-url">URL Database Firebase</label>
+                    <input type="url" id="db-url" placeholder="https://project-id.firebaseio.com" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="db-secret">Token / Database Secret</label>
+                    <input type="password" id="db-secret" placeholder="Masukkan token database" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="user-id">User ID</label>
+                    <input type="text" id="user-id" placeholder="contoh: latif, solaUI" required>
+                </div>
+				<!-- Tambahkan di dalam <form>, di atas User ID -->
+				<!-- WiFi Credentials - Side by Side -->
+				<div class="form-row">
+					<div class="form-group">
+						<label for="wifiSsid">📶 Nama WiFi (SSID)</label>
+						<input type="text" id="wifiSsid" placeholder="UMS Wifi" value="UMS Wifi" required>
+					</div>
+					<div class="form-group">
+						<label for="wifiPass"> Password WiFi</label>
+						<input type="password" id="wifiPass" placeholder="ums.wifi" value="ums.wifi" required>
+					</div>
+				</div>
+                
+                <button type="submit" class="login-btn">Masuk ke Dashboard</button>
+            </form>
+            
+            <div class="hint">
+                <strong>Catatan:</strong> Pastikan URL dan Token sudah benar. Data akan disiapkan otomatis jika User ID baru.
+            </div>
+        </div>
+    </div>
+
+    <!-- OVERLAY ANIMASI (Tersembunyi secara default) -->
+    <div id="loadingOverlay" class="loading-overlay hidden">
+        <div class="spinner"></div>
+        <p id="loadingText">Memverifikasi kredensial...</p>
+    </div>
+
+    <!-- Muat adduser.js DULUAN, baru login.js -->
+    <script src="adduser.js"></script>
+    <script src="login.js"></script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pengaturan - IoT Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="settings-page">
+        
+        <!-- HEADER -->
+        <header class="settings-header">
+            <button id="backBtn" class="icon-btn">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                Kembali
+            </button>
+            <h1>Pengaturan Tampilan</h1>
+            <div class="spacer"></div> <!-- Penjaga keseimbangan flexbox -->
+        </header>
+
+        <!-- KONTEN UTAMA (Akan di-scroll jika panjang) -->
+        <main class="settings-content" id="dynamic-settings-container">
+            <div class="loading-state">
+                <p>Memuat data widget dari server...</p>
+            </div>
+        </main>
+
+        <!-- FOOTER (Sticky di bawah) -->
+        <footer class="settings-footer">
+            <button id="saveBtn" class="primary-btn">Simpan Pengaturan</button>
+        </footer>
+
+    </div>
+
+    <script src="settings.js"></script>
+</body>
+</html>/* ======================================
+   CSS VARIABLES & RESET (Compact)
+   ====================================== */
+:root {
+    /* Primary Colors */
+    --primary-navy: #0a1628;
+    --secondary-navy: #1e3a5f;
+    --accent-navy: #2d5a87;
+    
+    /* Gold/Amber Colors */
+    --primary-gold: #ffd700;
+    --secondary-gold: #ffb700;
+    --light-gold: #ffed4e;
+    --dark-gold: #cc9900;
+    
+    /* Neutral Colors */
+    --bg-dark: #0d1b2a;
+    --bg-card: #1b263b;
+    --bg-card-hover: #243447;
+    --text-primary: #e0e1dd;
+    --text-secondary: #778da9;
+    --text-muted: #415a77;
+    
+    /* Status Colors */
+    --success: #06ffa5;
+    --success-dark: #04cc85;
+    --danger: #ff006e;
+    --danger-dark: #cc0058;
+    --warning: #ffbe0b;
+    --info: #00b4d8;
+    
+    /* Gradients */
+    --gradient-gold: linear-gradient(135deg, var(--primary-gold) 0%, var(--light-gold) 100%);
+    --gradient-navy: linear-gradient(135deg, var(--primary-navy) 0%, var(--secondary-navy) 100%);
+    --gradient-card: linear-gradient(145deg, var(--bg-card) 0%, var(--bg-card-hover) 100%);
+    
+    /* Shadows */
+    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.5);
+    --shadow-gold: 0 4px 16px rgba(255, 215, 0, 0.2);
+    
+    /* Transitions */
+    --transition-fast: 0.2s ease;
+    --transition-normal: 0.3s ease;
+    
+    /* Border Radius (Reduced) */
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --radius-xl: 20px;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+/* ======================================
+   BODY & BASE STYLES
+   ====================================== */
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: var(--gradient-navy);
+    background-attachment: fixed;
+    color: var(--text-primary);
+    min-height: 100vh;
+    line-height: 1.5;
+    overflow-x: hidden;
+}
+
+/* ======================================
+   LOGIN SCREEN STYLES (Super Compact)
+   ====================================== */
+.login-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    padding: 16px;
+    position: relative;
+    z-index: 1;
+}
+
+.login-card {
+    background: rgba(27, 38, 59, 0.95);
+    padding: 20px 24px; /* Dikurangi dari 32px 28px */
+    border-radius: var(--radius-xl);
+    width: 100%;
+    max-width: 420px;
+    text-align: center;
+    border: 2px solid rgba(255, 215, 0, 0.2);
+    box-shadow: var(--shadow-lg), var(--shadow-gold);
+    animation: slideUp 0.5s ease-out;
+}
+
+@keyframes slideUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.login-card h1 {
+    font-size: 1.8rem;
+    margin-bottom: 4px; /* Dikurangi dari 8px */
+    margin-top: 0; /* Pastikan tidak ada margin atas */
+    background: var(--gradient-gold);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-weight: 700;
+}
+
+.login-card .subtitle {
+    color: var(--text-secondary);
+    margin-bottom: 16px; /* Dikurangi dari 24px */
+    font-size: 0.85rem;
+}
+
+.form-group {
+    text-align: left;
+    margin-bottom: 12px; /* Dikurangi dari 16px */
+}
+
+.form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px; /* Dikurangi dari 16px */
+    margin-bottom: 12px;
+}
+
+.form-row .form-group {
+    margin-bottom: 0;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 4px; /* Dikurangi dari 6px */
+    color: var(--primary-gold);
+    font-weight: 600;
+    font-size: 0.75rem; /* Dikurangi sedikit */
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.form-group input {
+    width: 100%;
+    padding: 8px 12px; /* Dikurangi dari 10px 14px */
+    border-radius: var(--radius-md);
+    border: 2px solid rgba(255, 215, 0, 0.2);
+    background: rgba(13, 27, 42, 0.8);
+    color: var(--text-primary);
+    font-size: 0.9rem; /* Dikurangi dari 0.95rem */
+    outline: none;
+    transition: border-color var(--transition-normal), box-shadow var(--transition-normal), background var(--transition-normal);
+}
+
+.form-group input:focus {
+    border-color: var(--primary-gold);
+    box-shadow: 0 0 0 3px rgba(255, 215, 0, 0.15);
+    background: rgba(13, 27, 42, 1);
+}
+
+.form-group small {
+    display: block;
+    margin-top: 4px;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.login-btn {
+    width: 100%;
+    padding: 10px; /* Dikurangi dari 12px */
+    background: var(--gradient-gold);
+    color: var(--primary-navy);
+    border: none;
+    border-radius: var(--radius-md);
+    font-size: 0.95rem; /* Dikurangi dari 1rem */
+    font-weight: 700;
+    cursor: pointer;
+    transition: transform var(--transition-normal), box-shadow var(--transition-normal);
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    box-shadow: var(--shadow-gold);
+}
+
+.login-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(255, 215, 0, 0.3);
+}
+
+.login-btn:active {
+    transform: translateY(0);
+}
+
+.hint {
+    margin-top: 12px; /* Dikurangi dari 16px */
+    font-size: 0.75rem; /* Dikurangi dari 0.8rem */
+    color: var(--text-secondary);
+    padding: 8px; /* Dikurangi dari 10px */
+    background: rgba(255, 215, 0, 0.05);
+    border-radius: var(--radius-sm);
+    border-left: 3px solid var(--primary-gold);
+}
+
+/* Responsive untuk layar kecil */
+@media (max-width: 600px) {
+    .login-card {
+        padding: 16px 18px; /* Lebih compact lagi di mobile */
+    }
+    
+    .login-card h1 {
+        font-size: 1.6rem;
+    }
+    
+    .form-row {
+        grid-template-columns: 1fr;
+        gap: 0;
+    }
+    
+    .form-row .form-group {
+        margin-bottom: 12px;
+    }
+}
+
+@media (max-width: 480px) {
+    .login-container {
+        padding: 12px;
+    }
+    
+    .login-card {
+        padding: 14px 16px;
+    }
+}
+
+/* ======================================
+   DASHBOARD CONTAINER & HEADER (Compact)
+   ====================================== */
+.container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 20px 16px;
+    position: relative;
+    z-index: 1;
+}
+
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+    padding: 20px 24px;
+    background: var(--gradient-card);
+    border-radius: var(--radius-lg);
+    border: 1px solid rgba(255, 215, 0, 0.15);
+    box-shadow: var(--shadow-md);
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+header h1 {
+    font-size: 1.6rem;
+    background: var(--gradient-gold);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-weight: 700;
+}
+
+.subtitle {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+#user-display {
+    margin-top: 4px;
+    font-size: 0.8rem;
+    color: var(--primary-gold);
+    opacity: 0.9;
+}
+
+.header-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.settings-btn, .logout-btn {
+    padding: 8px 16px;
+    border-radius: var(--radius-md);
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform var(--transition-normal), background var(--transition-normal), border-color var(--transition-normal);
+    border: 2px solid transparent;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.settings-btn {
+    background: rgba(255, 215, 0, 0.15);
+    color: var(--primary-gold);
+    border-color: rgba(255, 215, 0, 0.3);
+}
+
+.settings-btn:hover {
+    background: rgba(255, 215, 0, 0.25);
+    border-color: var(--primary-gold);
+    transform: translateY(-2px);
+}
+
+.logout-btn {
+    background: rgba(255, 0, 110, 0.15);
+    color: var(--danger);
+    border-color: rgba(255, 0, 110, 0.3);
+}
+
+.logout-btn:hover {
+    background: rgba(255, 0, 110, 0.25);
+    border-color: var(--danger);
+    transform: translateY(-2px);
+}
+
+/* ======================================
+   DASHBOARD GRID & WIDGETS (Compact)
+   ====================================== */
+.dashboard {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.widget {
+    background: var(--gradient-card);
+    border-radius: var(--radius-lg);
+    padding: 16px;
+    box-shadow: var(--shadow-md);
+    border: 1px solid rgba(255, 215, 0, 0.1);
+    transition: transform var(--transition-normal), box-shadow var(--transition-normal), border-color var(--transition-normal);
+    position: relative;
+    overflow: hidden;
+    animation: fadeIn 0.4s ease-out;
+    will-change: transform;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(15px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.widget::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    background: var(--gradient-gold);
+    opacity: 0.8;
+}
+
+.widget:hover {
+    transform: translateY(-4px);
+    box-shadow: var(--shadow-lg), 0 0 20px rgba(255, 215, 0, 0.1);
+    border-color: rgba(255, 215, 0, 0.25);
+}
+
+.widget.hidden { display: none; }
+
+.widget-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.widget-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--primary-gold);
+}
+
+.widget-value {
+    font-size: 1.2rem;
+    font-weight: 700;
+    background: var(--gradient-gold);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+/* ======================================
+   GAUGE WIDGETS (Compact)
+   ====================================== */
+.gauge-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 12px 0;
+}
+
+.gauge-circle {
+    position: relative;
+    width: 130px;
+    height: 130px;
+}
+
+.gauge-circle svg {
+    transform: rotate(-90deg);
+    width: 100%;
+    height: 100%;
+}
+
+.gauge-bg {
+    fill: none;
+    stroke: rgba(255, 255, 255, 0.08);
+    stroke-width: 10;
+}
+
+.gauge-fill {
+    fill: none;
+    stroke: var(--primary-gold);
+    stroke-width: 10;
+    stroke-linecap: round;
+    stroke-dasharray: 284;
+    stroke-dashoffset: 284;
+    transition: stroke-dashoffset 0.5s ease-out;
+    will-change: stroke-dashoffset;
+}
+
+.gauge-text {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+}
+
+.gauge-text span {
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--primary-gold);
+    display: block;
+    line-height: 1;
+}
+
+.gauge-text small {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-top: 2px;
+}
+
+/* ======================================
+   HORIZONTAL LEVEL WIDGETS (Compact)
+   ====================================== */
+.hlevel-bar {
+    width: 100%;
+    height: 28px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    margin: 12px 0;
+    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.hlevel-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--success) 0%, var(--primary-gold) 100%);
+    width: 0%;
+    transition: width 0.5s ease-out;
+    will-change: width;
+    border-radius: var(--radius-md);
+}
+
+.hlevel-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+/* ======================================
+   INDICATOR & SWITCH WIDGETS (Compact)
+   ====================================== */
+.indicator-content {
+    text-align: center;
+    padding: 20px 16px;
+    background: rgba(255, 215, 0, 0.05);
+    border-radius: var(--radius-md);
+    border: 1px solid rgba(255, 215, 0, 0.15);
+}
+
+.indicator-text {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.switch-container {
+    display: flex;
+    justify-content: center;
+    padding: 12px 0;
+}
+
+.switch {
+    position: relative;
+    display: inline-block;
+    width: 56px;
+    height: 30px;
+}
+
+.switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(255, 255, 255, 0.1);
+    transition: background var(--transition-normal), border-color var(--transition-normal);
+    border-radius: 30px;
+    border: 2px solid rgba(255, 215, 0, 0.2);
+}
+
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 20px;
+    width: 20px;
+    left: 3px;
+    bottom: 3px;
+    background: var(--text-secondary);
+    transition: transform var(--transition-normal), background var(--transition-normal);
+    border-radius: 50%;
+}
+
+input:checked + .slider {
+    background: rgba(255, 215, 0, 0.2);
+    border-color: var(--primary-gold);
+}
+
+input:checked + .slider:before {
+    transform: translateX(26px);
+    background: var(--primary-gold);
+}
+
+/* ======================================
+   ALERT WIDGETS (Compact)
+   ====================================== */
+.alert-content {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 16px 14px;
+    background: rgba(6, 255, 165, 0.08);
+    border-radius: var(--radius-md);
+    border: 2px solid rgba(6, 255, 165, 0.3);
+    transition: border-color 0.5s ease, background 0.5s ease;
+}
+
+.alert-content.danger {
+    background: rgba(255, 0, 110, 0.08);
+    border-color: rgba(255, 0, 110, 0.3);
+    animation: pulse-light 1.5s infinite;
+}
+
+@keyframes pulse-light {
+    0%, 100% { 
+        border-color: rgba(255, 0, 110, 0.3); 
+        background: rgba(255, 0, 110, 0.08);
+    }
+    50% { 
+        border-color: rgba(255, 0, 110, 0.8); 
+        background: rgba(255, 0, 110, 0.15);
+    }
+}
+
+.alert-icon { font-size: 2.4rem; line-height: 1; }
+.alert-text { font-size: 1rem; font-weight: 700; color: var(--success); }
+.alert-content.danger .alert-text { color: var(--danger); }
+
+/* ======================================
+   MODAL STYLES (Compact)
+   ====================================== */
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0; top: 0;
+    width: 100%; height: 100%;
+    background-color: rgba(10, 22, 40, 0.95);
+    animation: fadeIn 0.2s ease;
+}
+
+.modal.active {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 16px;
+}
+
+.modal-content {
+    background: var(--gradient-card);
+    border-radius: var(--radius-xl);
+    width: 100%;
+    max-width: 500px;
+    max-height: 85vh;
+    overflow-y: auto;
+    border: 2px solid rgba(255, 215, 0, 0.25);
+    box-shadow: var(--shadow-lg), var(--shadow-gold);
+    animation: slideUp 0.3s ease-out;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 2px solid rgba(255, 215, 0, 0.15);
+}
+
+.modal-header h2 {
+    color: var(--primary-gold);
+    font-size: 1.2rem;
+    font-weight: 700;
+}
+
+.close-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.8rem;
+    cursor: pointer;
+    transition: color var(--transition-fast), background var(--transition-fast);
+    width: 32px; height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+}
+
+.close-btn:hover {
+    color: var(--danger);
+    background: rgba(255, 0, 110, 0.1);
+}
+
+.modal-body { padding: 16px 20px 20px; }
+
+.setting-item {
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    transition: background var(--transition-fast);
+    border-radius: var(--radius-sm);
+}
+
+.setting-item:hover { background: rgba(255, 215, 0, 0.05); }
+.setting-item:last-child { border-bottom: none; }
+
+.setting-item label {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.setting-item input[type="checkbox"] {
+    width: 18px; height: 18px;
+    cursor: pointer;
+    accent-color: var(--primary-gold);
+}
+
+.setting-item span { flex: 1; }
+
+/* ======================================
+   SCROLLBAR & RESPONSIVE
+   ====================================== */
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: var(--bg-dark); }
+::-webkit-scrollbar-thumb {
+    background: var(--accent-navy);
+    border-radius: 4px;
+    border: 2px solid var(--bg-dark);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--primary-gold); }
+
+@media (max-width: 768px) {
+    header { flex-direction: column; text-align: center; padding: 16px; }
+    header h1 { font-size: 1.4rem; }
+    .header-actions { width: 100%; justify-content: center; }
+    .dashboard { grid-template-columns: 1fr; gap: 12px; }
+    .widget { padding: 14px; }
+    .login-card { padding: 24px 20px; }
+    .gauge-circle { width: 120px; height: 120px; }
+    .gauge-text span { font-size: 1.6rem; }
+}
+
+@media (max-width: 480px) {
+    .container { padding: 12px; }
+    .widget { padding: 12px; }
+    .widget-title { font-size: 0.9rem; }
+    .widget-value { font-size: 1.1rem; }
+}
+
+.hidden { display: none !important; }
+
+/* ======================================
+   LOADING OVERLAY & ANIMATION
+   ====================================== */
+.loading-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(10, 22, 40, 0.95);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    z-index: 9999;
+    transition: opacity 0.3s ease;
+}
+
+.loading-overlay.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.spinner {
+    width: 40px;
+    height: 40px;
+    border: 4px solid rgba(255, 215, 0, 0.2);
+    border-top-color: var(--primary-gold);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-bottom: 16px;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.loading-overlay p {
+    color: var(--text-primary);
+    font-size: 1rem;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    animation: pulse-text 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-text {
+    0%, 100% { opacity: 0.7; }
+    50% { opacity: 1; }
+}
+
+/* ==========================================
+   SETTINGS FULL PAGE LAYOUT (Compact)
+   ========================================== */
+.settings-page {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    background-color: var(--bg-primary, #0f172a);
+    color: var(--text-primary, #f8fafc);
+}
+
+/* Header Settings */
+.settings-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    background: rgba(0, 0, 0, 0.2);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.settings-header h1 {
+    font-size: 1.1rem;
+    margin: 0;
+    font-weight: 600;
+}
+
+.icon-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-primary, #f8fafc);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    padding: 6px;
+    border-radius: 6px;
+    transition: background 0.2s;
+}
+
+.icon-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.spacer {
+    width: 80px;
+}
+
+/* Konten Utama */
+.settings-content {
+    flex: 1;
+    padding: 16px 20px;
+    max-width: 1000px;
+    margin: 0 auto;
+    width: 100%;
+    box-sizing: border-box;
+    overflow-y: auto;
+}
+
+/* Group Widget */
+.widget-group {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+}
+
+.widget-group h3 {
+    margin-top: 0;
+    margin-bottom: 12px;
+    font-size: 1rem;
+    color: var(--primary-gold, #fbbf24);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    padding-bottom: 8px;
+}
+
+/* Grid Checkbox */
+.widget-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 10px;
+}
+
+/* Checkbox Label */
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.2);
+    transition: all 0.2s;
+    border: 1px solid transparent;
+}
+
+.checkbox-label:hover {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.1);
+}
+
+.checkbox-label input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--primary-gold, #fbbf24);
+    cursor: pointer;
+}
+
+.checkbox-label span {
+    font-size: 0.85rem;
+}
+
+.key-hint {
+    font-size: 0.7rem;
+    opacity: 0.5;
+    font-weight: normal;
+}
+
+/* Footer Sticky */
+.settings-footer {
+    padding: 12px 20px;
+    background: rgba(0, 0, 0, 0.3);
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    display: flex;
+    justify-content: flex-end;
+    position: sticky;
+    bottom: 0;
+    z-index: 10;
+}
+
+.primary-btn {
+    background: var(--primary-gold, #fbbf24);
+    color: #000;
+    border: none;
+    padding: 10px 24px;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: opacity 0.2s;
+}
+
+.primary-btn:hover {
+    opacity: 0.9;
+}
+
+/* Status States */
+.loading-state, .empty-state, .error-state {
+    text-align: center;
+    padding: 24px;
+    opacity: 0.7;
+    font-size: 0.95rem;
+}
+.error-state { color: #ef4444; }
+
+/* Mobile Responsive */
+@media (max-width: 600px) {
+    .widget-grid {
+        grid-template-columns: 1fr;
+    }
+    .settings-header h1 {
+        font-size: 0.95rem;
+    }
+}
+
+/* Form Row untuk layout side-by-side */
+.form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.form-row .form-group {
+    margin-bottom: 0;
+}
+
+/* Responsive: tetap berdampingan di mobile, tapi lebih kecil */
+@media (max-width: 600px) {
+    .form-row {
+        grid-template-columns: 1fr 1fr; /* Tetap 2 kolom */
+        gap: 8px; /* Gap lebih kecil */
+    }
+    
+    .form-row .form-group {
+        margin-bottom: 0;
+    }
+    
+    .form-row .form-group label {
+        font-size: 0.7rem; /* Label lebih kecil */
+    }
+    
+    .form-row .form-group input {
+        padding: 6px 8px; /* Input lebih compact */
+        font-size: 0.8rem;
+    }
+}
+
+/* Untuk layar sangat kecil (< 400px), baru jadi vertikal */
+@media (max-width: 400px) {
+    .form-row {
+        grid-template-columns: 1fr;
+        gap: 0;
+    }
+    
+    .form-row .form-group {
+        margin-bottom: 12px;
+    }
+}
+# lab-iot.github.io

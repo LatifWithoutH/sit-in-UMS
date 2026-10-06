@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - IoT Monitoring</title>
+    <link rel="stylesheet" href="style.css">
+	<!-- Library untuk membuat file ZIP di browser -->
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+	<!-- Library untuk memicu download file -->
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- HEADER -->
+        <header>
+            <div class="header-info">
+                <h1>IoT Dashboard</h1>
+                <p class="subtitle">Sistem Monitoring Real-time</p>
+                <p class="user-info" id="user-display"></p>
+            </div>
+			<!-- Ganti bagian header-actions di dashboard.html -->
+            <div class="header-actions">
+                <a href="settings.html" class="settings-btn">Pengaturan</a>
+                <button id="logoutBtn" class="logout-btn">Keluar</button>
+            </div>
+        </header>
+
+		<div class="download-section" style="background: rgba(255,255,255,0.05); padding: 20px; border-radius: 12px; margin-bottom: 24px; border: 1px solid rgba(255,215,0,0.2);">
+		  <h3 style="color: var(--primary-gold); margin-bottom: 10px; font-size: 1.2rem;"> 📥 Unduh Kode Arduino</h3>
+		  <p style="color: var(--text-secondary); margin-bottom: 15px; font-size: 0.9rem;">Pilih modul spesifik atau unduh semua modul sekaligus dalam format .zip yang sudah disesuaikan dengan akun Anda.</p>
+		  
+		  <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+			<!-- Dropdown untuk unduh satuan -->
+			<select id="moduleSelect" style="padding: 10px; border-radius: 8px; border: 1px solid var(--accent-navy); background: var(--bg-dark); color: var(--text-primary); flex: 1; min-width: 200px;">
+			  <option value="">-- Pilih Modul Satuan --</option>
+			  <!-- Opsi akan diisi otomatis oleh JavaScript -->
+			</select>
+			
+			<button onclick="downloadArduinoCode()" style="padding: 10px 20px; background: linear-gradient(135deg, #FFD700, #FFA500); color: #1e3c72; border: none; border-radius: 8px; font-weight: bold; cursor: pointer;">
+			  ⬇️ Unduh Satuan
+			</button>
+
+			<!-- TOMBOL BARU: UNDUH SEMUA -->
+			<button onclick="downloadAllModules()" style="padding: 10px 20px; background: linear-gradient(135deg, #28a745, #218838); color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; display: flex; align-items: center; gap: 5px;">
+			  📦 Unduh Semua (.zip)
+			</button>
+		  </div>
+		  <p id="download-status" style="margin-top: 10px; font-size: 0.85rem; color: var(--primary-gold); display: none;"></p>
+		</div>
+
+
+        <!-- MAIN DASHBOARD -->
+        <main class="dashboard" id="dynamic-dashboard">
+            <p class="loading-text">Memuat data dari server...</p>
+        </main>
+    </div>
+	<!-- Letakkan di atas script dashboard.js -->
+	<script src="templates.js"></script>
+    <script src="dashboard.js"></script>
+</body>
+</html>
